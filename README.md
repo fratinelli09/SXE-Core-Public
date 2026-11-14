@@ -548,9 +548,15 @@ ranking and the best `.ini` ready for SXE. The best results are then checked on 
 used for the tuning and with the neighbouring parameter values: the robust choice is the one
 whose worst case is the highest.
 
-### Graphical interface - planned
-Configuration, simulation with charts (price, orders, equity, drawdown, cycles) and
-parameter tuning from a window. Separate program: SXE keeps running on its own without it.
+### SXE Studio - in development
+SXE Core is being incorporated into SXE Studio, a desktop application for Windows and Linux
+that runs entirely on the user's PC. It brings together market charts (several timeframes of
+the same asset, on several monitors), candle-by-candle replay of historical data, backtesting
+and parameter optimisation, all powered by SXE Core, so that strategies are designed, tested
+and tuned in one place and stay private to their author. Historical data are downloaded by
+the user from public sources; nothing is hosted by the project. SXE Core remains a separate
+engine that runs on its own, as a program or as a library. This public edition is kept at
+the version described here.
 
 
 ## Contact
