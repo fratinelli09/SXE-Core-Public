@@ -15,6 +15,7 @@ data   = @T_DATA_DIR@
 
 [EXCHANGE]
 margin_mode        = @T_MARGIN@
+position_mode      = @T_POSITION_MODE@
 fee_taker          = 0.0006
 fee_maker          = 0.0002
 slippage           = @T_SLIPPAGE@

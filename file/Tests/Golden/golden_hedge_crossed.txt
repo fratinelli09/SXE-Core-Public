@@ -1,0 +1,3 @@
+CYCLE;OPEN;CLOSE;CAPITAL_START;CAPITAL_END;GROWTH%;DRAWDOWN%;MAX_LEVERAGE;BUYS;ENTRY_PRICE;AVG_PRICE;EXIT_PRICE;FEES;FUNDING;CLOSED_BY;SIDE
+1;2023-01-01 00:12;2023-12-05 17:40;100000.00;0.00;-100.00;-100.00;7.48;41;16545.08;16538.46;43908.29;19227.18;-5246.50;liquidation;long+short
+# Simulation finished (capital 0.00 USDT below the minimum order) at 2023-12-05 17:40: equity 0.00 USDT (-100.00% on the initial capital), drawdown max -100.00%, closed cycles 40 (in profit 40), liquidations 1, orders 81, rejected 355, fees 19227.18 USDT, partial liquidations 2, funding -5246.50 USDT

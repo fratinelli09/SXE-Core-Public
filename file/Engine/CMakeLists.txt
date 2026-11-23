@@ -1,6 +1,7 @@
 # libEngine.so: engine (thread), strategy loading, cycle archive
 add_library(Engine SHARED
     Src/CStrategyLoader.cpp
+    Src/CCStrategy.cpp
     Src/CCycleArchive.cpp
     Src/CSimStateFile.cpp
     Src/CEngine.cpp

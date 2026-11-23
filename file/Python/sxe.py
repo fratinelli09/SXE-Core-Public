@@ -77,7 +77,8 @@ class Cycle:
     exit_price: float
     fees: float
     funding: float
-    closed_by: str          # "strategy", "liquidation", "open at end of simulation"
+    closed_by: str          # "strategy", "limit", "stop", "liquidation", "open at end of simulation"
+    side: str = "long"      # "long", "short" or "long+short" (hedge)
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,7 @@ class _CCycle(ctypes.Structure):
                 ("max_leverage", ctypes.c_double), ("buys", ctypes.c_int64),
                 ("entry_price", ctypes.c_double), ("avg_price", ctypes.c_double),
                 ("exit_price", ctypes.c_double), ("fees", ctypes.c_double), ("funding", ctypes.c_double),
-                ("closed_by", ctypes.c_char_p)]
+                ("closed_by", ctypes.c_char_p), ("side", ctypes.c_char_p)]
 
 
 class _CResult(ctypes.Structure):
@@ -271,7 +272,7 @@ def _value(value: Value) -> str:
 def _cycle(c: _CCycle) -> Cycle:
     return Cycle(c.cycle, _time(c.open_time), _time(c.close_time), c.capital_start, c.capital_end,
                  c.growth_pct, c.drawdown_pct, c.max_leverage, c.buys, c.entry_price, c.avg_price,
-                 c.exit_price, c.fees, c.funding, _text(c.closed_by))
+                 c.exit_price, c.fees, c.funding, _text(c.closed_by), _text(c.side))
 
 
 def _result(r: _CResult, cycles: List[Cycle]) -> Result:

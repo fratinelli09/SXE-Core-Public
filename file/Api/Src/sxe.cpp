@@ -100,6 +100,10 @@ struct sxe_engine
 	void*           pProgressUser = nullptr;
 	sxe_cycle_fn    fnCycle    = nullptr;
 	void*           pCycleUser = nullptr;
+	sxe_fill_fn     fnFill     = nullptr;
+	void*           pFillUser  = nullptr;
+	sxe_candle_fn   fnCandle   = nullptr;
+	void*           pCandleUser = nullptr;
 
 	std::vector<std::string> vErrors;
 	std::string              strError;
@@ -195,6 +199,7 @@ namespace
 			return engine->Fail(SXE_ERR_STATE, "the engine has already been set up");
 
 		CSettings settings;
+		settings.bDataInMemory = engine->options.pCandles != nullptr;
 		if(!settings.LoadText(engine->ConfigText(), engine->strConfigName, engine->strBaseDir))
 		{
 			engine->eState = EngineState::Failed;
@@ -258,7 +263,52 @@ namespace
 				cycle.fees          = row.dFees;
 				cycle.funding       = row.dFunding;
 				cycle.closed_by     = row.strClosedBy.c_str();
+				cycle.side          = row.strSide.c_str();
 				engine->fnCycle(engine->pCycleUser, &cycle);
+			};
+		}
+
+		if(engine->fnFill)
+		{
+			options.fnFill = [engine](const FillInfo& info)
+			{
+				static const char* TYPES[] = { "market", "limit", "stop" };
+				sxe_fill fill;
+				fill.time         = info.nTime;
+				fill.order_id     = info.nOrderId;
+				fill.side         = info.eSide == PositionSide::Long ? "long" : "short";
+				fill.action       = info.pszAction;
+				fill.type         = TYPES[static_cast<int>(info.eType)];
+				fill.price        = info.dPrice;
+				fill.qty          = info.dQty;
+				fill.fee          = info.dFee;
+				fill.pnl          = info.dPnL;
+				fill.position_qty = info.dPositionQty;
+				fill.avg_price    = info.dAvgPrice;
+				fill.wallet       = info.dWallet;
+				fill.funding      = info.dFunding;
+				fill.reason       = info.strReason.c_str();
+				engine->fnFill(engine->pFillUser, &fill);
+			};
+		}
+		if(engine->fnCandle)
+		{
+			options.fnCandle = [engine](const CandleInfo& info)
+			{
+				sxe_candle_state candle;
+				candle.time         = info.nTime;
+				candle.open         = info.dOpen;
+				candle.high         = info.dHigh;
+				candle.low          = info.dLow;
+				candle.close        = info.dClose;
+				candle.equity       = info.dEquity;
+				candle.wallet       = info.dWallet;
+				candle.drawdown_pct = info.dDrawdown;
+				candle.long_qty     = info.dLongQty;
+				candle.long_avg     = info.dLongAvg;
+				candle.short_qty    = info.dShortQty;
+				candle.short_avg    = info.dShortAvg;
+				engine->fnCandle(engine->pCandleUser, &candle);
 			};
 		}
 
@@ -438,6 +488,67 @@ SXE_API sxe_status sxe_engine_on_cycle(sxe_engine* engine, sxe_cycle_fn fn, void
 			return engine->Fail(SXE_ERR_STATE, "callbacks can only be changed before the setup");
 		engine->fnCycle    = fn;
 		engine->pCycleUser = user;
+		return SXE_OK;
+	});
+}
+
+SXE_API sxe_status sxe_engine_on_fill(sxe_engine* engine, sxe_fill_fn fn, void* user)
+{
+	return Guard(engine, [&]
+	{
+		if(engine->eState != EngineState::Config)
+			return engine->Fail(SXE_ERR_STATE, "callbacks can only be changed before the setup");
+		engine->fnFill    = fn;
+		engine->pFillUser = user;
+		return SXE_OK;
+	});
+}
+
+SXE_API sxe_status sxe_engine_on_candle(sxe_engine* engine, sxe_candle_fn fn, void* user)
+{
+	return Guard(engine, [&]
+	{
+		if(engine->eState != EngineState::Config)
+			return engine->Fail(SXE_ERR_STATE, "callbacks can only be changed before the setup");
+		engine->fnCandle    = fn;
+		engine->pCandleUser = user;
+		return SXE_OK;
+	});
+}
+
+SXE_API sxe_status sxe_engine_set_candles(sxe_engine* engine, const sxe_candle* candles, int64_t count, int64_t interval_seconds)
+{
+	return Guard(engine, [&]
+	{
+		if(engine->eState != EngineState::Config)
+			return engine->Fail(SXE_ERR_STATE, "candles can only be given before the setup");
+		if(candles == nullptr || count < 2)
+			return engine->Fail(SXE_ERR_ARGUMENT, "at least two candles are needed");
+		if(interval_seconds <= 0)
+			return engine->Fail(SXE_ERR_ARGUMENT, "invalid candle duration");
+
+		auto pSeries = std::make_shared<CandleSeries>();
+		pSeries->nInterval = interval_seconds;
+		pSeries->vCandles.reserve(static_cast<size_t>(count));
+		for(int64_t i = 0; i < count; i++)
+		{
+			const sxe_candle& c = candles[i];
+			if(!(c.high >= c.low) || !(c.open > 0) || !(c.close > 0) || !(c.low > 0))
+				return engine->Fail(SXE_ERR_ARGUMENT, "candle " + std::to_string(i) + " is not valid");
+			if(i > 0 && c.time <= candles[i - 1].time)
+				return engine->Fail(SXE_ERR_ARGUMENT, "the candles must be in time order (candle " + std::to_string(i) + ")");
+			if(i > 0 && c.time - candles[i - 1].time > interval_seconds)
+				pSeries->nGaps++;
+			Candle candle;
+			candle.nTime   = c.time;
+			candle.dOpen   = c.open;
+			candle.dHigh   = c.high;
+			candle.dLow    = c.low;
+			candle.dClose  = c.close;
+			candle.dVolume = c.volume;
+			pSeries->vCandles.push_back(candle);
+		}
+		engine->options.pCandles = std::move(pSeries);
 		return SXE_OK;
 	});
 }

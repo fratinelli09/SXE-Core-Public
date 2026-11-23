@@ -28,7 +28,7 @@ if(NOT PROJECT_NAME STREQUAL "SXE")
         set(CMAKE_BUILD_TYPE Release CACHE STRING "Tipo di build" FORCE)
     endif()
     if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-        set(CMAKE_INSTALL_PREFIX "${SXE_ROOT}/Target" CACHE PATH "Cartella di esecuzione di SXE" FORCE)
+        set(CMAKE_INSTALL_PREFIX "${SXE_ROOT}/Target" CACHE PATH "Run folder of SXE" FORCE)
     endif()
 
     set(SXE_BIN_DIR      Bin)

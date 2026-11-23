@@ -9,6 +9,7 @@
 
 namespace
 {
+	//fields separated by ',' or ';'
 	void SplitLine(const std::string& strLine, std::vector<std::string>& vFields)
 	{
 		vFields.clear();
@@ -28,6 +29,7 @@ namespace
 		vFields.push_back(strField);
 	}
 
+	//always with the decimal point, whatever the locale
 	bool ToDouble(const std::string& s, double& d)
 	{
 		const char* pBegin = s.data();
@@ -41,18 +43,17 @@ namespace
 
 namespace
 {
+	//limit to the intermediate ticks between two points (anomalous data)
 	const int MAX_TICK_INTERMEDI = 1000;
 }
 
 CCsvFeed::CCsvFeed():
-	nInterval(0),
+	pSeries(std::make_shared<CandleSeries>()),
 	nCandle(0),
 	nTick(0),
 	bStarted(false),
 	nIntrabar(1),
-	dTickStep(0),
-	nSkippedRows(0),
-	nGaps(0)
+	dTickStep(0)
 {
 	vTicks.reserve(4 * MAX_TICK_INTERMEDI + 4);
 }
@@ -63,25 +64,21 @@ void CCsvFeed::SetTicks(int nIntrabarMode, double dStep)
 	dTickStep = dStep;
 }
 
-bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, const std::string& strEnd)
+std::shared_ptr<const CandleSeries> CCsvFeed::Read(const std::string& strFile, const std::string& strStart,
+                                                   const std::string& strEnd, std::string& strError)
 {
-	vCandles.clear();
-	vTicks.clear();
-	nCandle = 0;
-	nTick = 0;
-	bStarted = false;
-	nSkippedRows = 0;
-	nGaps = 0;
-
 	std::ifstream csv(strFile);
 	if(!csv)
 	{
-		strLastError = "Candle file cannot be read: " + strFile;
-		return false;
+		strError = "Candle file cannot be read: " + strFile;
+		return nullptr;
 	}
 
+	auto pRead = std::make_shared<CandleSeries>();
+	std::vector<Candle>& vCandles = pRead->vCandles;
+
 	const long long nStart = strStart.empty() ? -1 : TimeUtils::Parse(strStart);
-	const long long nEnd   = strEnd.empty()   ? -1 : TimeUtils::Parse(strEnd) + 24 * 3600;
+	const long long nEnd   = strEnd.empty()   ? -1 : TimeUtils::Parse(strEnd) + 24 * 3600;	//end of the day
 
 	std::string strLine;
 	std::vector<std::string> vFields;
@@ -96,6 +93,7 @@ bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, con
 
 		SplitLine(strLine, vFields);
 
+		//date and time in two columns ("2018-07-27;07:45;..."): the prices start from the third
 		const bool bSplitTime = vFields.size() >= 6 && vFields[1].find(':') != std::string::npos &&
 		                        vFields[1].find('-') == std::string::npos;
 		const size_t nPrice = bSplitTime ? 2 : 1;
@@ -108,8 +106,9 @@ bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, con
 		                 c.dOpen > 0 && c.dHigh > 0 && c.dLow > 0 && c.dClose > 0;
 		if(!bOk)
 		{
+			//the first row can be the header
 			if(nRow > 1)
-				++nSkippedRows;
+				++pRead->nSkippedRows;
 			continue;
 		}
 		if(vFields.size() >= nPrice + 5)
@@ -120,11 +119,12 @@ bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, con
 		if(nEnd >= 0 && c.nTime >= nEnd)
 			break;
 
+		//rows out of order or duplicated would distort the simulation
 		if(c.nTime <= nPrevTime)
 		{
-			strLastError = "Row " + std::to_string(nRow) + " of " + strFile + " is not in time order (" +
-			               vFields[0] + ")";
-			return false;
+			strError = "Row " + std::to_string(nRow) + " of " + strFile + " is not in time order (" +
+			           vFields[0] + ")";
+			return nullptr;
 		}
 		nPrevTime = c.nTime;
 
@@ -133,20 +133,39 @@ bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, con
 
 	if(vCandles.empty())
 	{
-		strLastError = "No valid candle in " + strFile + " in the requested period";
-		return false;
+		strError = "No valid candle in " + strFile + " in the requested period";
+		return nullptr;
 	}
 
-	nInterval = vCandles.size() > 1 ? vCandles[1].nTime - vCandles[0].nTime : 0;
+	pRead->nInterval = vCandles.size() > 1 ? vCandles[1].nTime - vCandles[0].nTime : 0;
 	for(size_t i = 1; i < vCandles.size(); i++)
-		if(vCandles[i].nTime - vCandles[i - 1].nTime > nInterval)
-			++nGaps;
+		if(vCandles[i].nTime - vCandles[i - 1].nTime > pRead->nInterval)
+			++pRead->nGaps;
+	return pRead;
+}
+
+bool CCsvFeed::Load(const std::string& strFile, const std::string& strStart, const std::string& strEnd)
+{
+	std::shared_ptr<const CandleSeries> pRead = Read(strFile, strStart, strEnd, strLastError);
+	if(!pRead)
+		return false;
+	Use(pRead);
 	return true;
+}
+
+void CCsvFeed::Use(std::shared_ptr<const CandleSeries> pCandles)
+{
+	pSeries  = pCandles ? std::move(pCandles) : std::make_shared<CandleSeries>();
+	vTicks.clear();
+	nCandle  = 0;
+	nTick    = 0;
+	bStarted = false;
 }
 
 void CCsvFeed::_BuildTicks(size_t nIndex)
 {
 	vTicks.clear();
+	const std::vector<Candle>& vCandles = pSeries->vCandles;
 	const Candle& c = vCandles[nIndex];
 
 	double vPoints[4];
@@ -164,6 +183,7 @@ void CCsvFeed::_BuildTicks(size_t nIndex)
 		vPoints[nPoints++] = c.dClose;
 	}
 
+	//it starts from the previous close: the same path also after a resume
 	double dCur = nIndex > 0 ? vCandles[nIndex - 1].dClose : 0;
 
 	for(int i = 0; i < nPoints; i++)
@@ -187,6 +207,9 @@ void CCsvFeed::_BuildTicks(size_t nIndex)
 
 bool CCsvFeed::Next(MarketStep& step)
 {
+	const std::vector<Candle>& vCandles = pSeries->vCandles;
+
+	//candle over (or none started yet): on to the next one
 	if(!bStarted || nTick >= vTicks.size())
 	{
 		const size_t nNextCandle = bStarted ? nCandle + 1 : 0;
@@ -203,7 +226,7 @@ bool CCsvFeed::Next(MarketStep& step)
 	const size_t nCount = vTicks.size();
 	const size_t i = nTick++;
 
-	step.nTime       = c.nTime + nInterval * static_cast<long long>(i + 1) / static_cast<long long>(nCount);
+	step.nTime       = c.nTime + pSeries->nInterval * static_cast<long long>(i + 1) / static_cast<long long>(nCount);
 	step.dPrice      = vTicks[i];
 	step.nCandleTime = c.nTime;
 	step.bFirstTick  = (i == 0);
@@ -218,16 +241,17 @@ bool CCsvFeed::Next(MarketStep& step)
 
 double CCsvFeed::Progress() const
 {
-	return vCandles.empty() ? 1.0 : static_cast<double>(CandlesDone()) / static_cast<double>(vCandles.size());
+	return pSeries->vCandles.empty() ? 1.0 : static_cast<double>(CandlesDone()) / static_cast<double>(pSeries->vCandles.size());
 }
 
 long long CCsvFeed::CurrentCandleTime() const
 {
-	return bStarted ? vCandles[nCandle].nTime : -1;
+	return bStarted ? pSeries->vCandles[nCandle].nTime : -1;
 }
 
 bool CCsvFeed::Seek(long long nCandleTime, size_t nNextTick)
 {
+	const std::vector<Candle>& vCandles = pSeries->vCandles;
 	const auto it = std::lower_bound(vCandles.begin(), vCandles.end(), nCandleTime,
 	                                 [](const Candle& c, long long t){ return c.nTime < t; });
 	if(it == vCandles.end() || it->nTime != nCandleTime)

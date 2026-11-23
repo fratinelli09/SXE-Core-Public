@@ -13,7 +13,7 @@
 #   cmake --install CMakeWork
 #==========================================================
 cmake_minimum_required(VERSION 3.16)
-project(SXE VERSION 1.6.0 LANGUAGES CXX)
+project(SXE VERSION 2.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,7 +41,7 @@ endif()
 
 # default install prefix: the project's runtime folder
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/Target" CACHE PATH "Cartella di esecuzione" FORCE)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/Target" CACHE PATH "Run folder" FORCE)
 endif()
 
 # folders inside Target/

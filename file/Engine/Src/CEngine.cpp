@@ -27,7 +27,7 @@ CEngine::CEngine(Logger& log):
 	logger(log),
 	pStrategy(nullptr),
 	orderRouter(*this),
-	ctx{0, 0, 0, 0, Candle(), false, Account(), Position(), false, {}, {}, orderRouter, log},
+	ctx{0, 0, 0, 0, Candle(), false, Account(), Position(), Position(), Position(), false, {}, {}, orderRouter, log},
 	step(),
 	bConsole(false),
 	dInitialCapital(0),
@@ -65,6 +65,8 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 	bStateFile = options.bStateFile;
 	nProgressEvery = options.nProgressEvery;
 	fnProgress     = options.fnProgress;
+	fnFill         = options.fnFill;
+	fnCandle       = options.fnCandle;
 	archive.SetCycleCallback(options.fnCycle);
 
 	if(!settings.bSimulate)
@@ -93,7 +95,9 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 
 	strDataFile = settings.sim.strDataFile;
 	pFeed = std::make_unique<CCsvFeed>();
-	if(!pFeed->Load(strDataFile, settings.sim.strStartDate, settings.sim.strEndDate))
+	if(options.pCandles)
+		pFeed->Use(options.pCandles);
+	else if(!pFeed->Load(strDataFile, settings.sim.strStartDate, settings.sim.strEndDate))
 	{
 		logger.Error(pFeed->GetLastError());
 		return false;
@@ -101,6 +105,8 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 	pFeed->SetTicks(settings.sim.nIntrabar, settings.sim.dTickStep);
 
 	static const char* INTRABAR[] = { "close only", "by candle direction", "low first", "high first" };
+	if(strDataFile.empty())
+		strDataFile = "(candles in memory)";
 	logger.Info("Candles loaded: " + std::to_string(pFeed->Count()) + " of " + std::to_string(pFeed->Interval() / 60) +
 	            " minutes (" + TimeUtils::Format(pFeed->FirstTime()) + " -> " + TimeUtils::Format(pFeed->LastTime()) +
 	            "), path " + INTRABAR[settings.sim.nIntrabar] + ", tick every " + Num(settings.sim.dTickStep * 100, 2) + "%");
@@ -126,6 +132,7 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 
 	ExchangeRules rules;
 	rules.eMarginMode        = (settings.exchange.strMarginMode == CFG_MARGIN_CROSSED) ? MarginMode::Crossed : MarginMode::Isolated;
+	rules.ePositionMode      = (settings.exchange.strPositionMode == CFG_POSITION_HEDGE) ? PositionMode::Hedge : PositionMode::OneWay;
 	rules.dFeeTaker          = settings.exchange.dFeeTaker;
 	rules.dFeeMaker          = settings.exchange.dFeeMaker;
 	rules.dSlippage          = settings.exchange.dSlippage;
@@ -157,7 +164,8 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 	            (settings.sim.strLimitFill == CFG_LIMIT_FILL_THROUGH
 	                 ? "when the price goes through the limit by " + Num(settings.sim.dTickStep * 100, 2) + "%"
 	                 : std::string("when the price touches the limit")) + ")");
-	logger.Info("Simulated exchange: margin " + settings.exchange.strMarginMode + ", liquidation " +
+	logger.Info("Simulated exchange: margin " + settings.exchange.strMarginMode + ", positions " +
+	            settings.exchange.strPositionMode + ", liquidation " +
 	            (settings.sim.nLiquidation ? "on" : "off") + ", funding " +
 	            (pExchange->FundingCount() ? "from history (" + std::to_string(pExchange->FundingCount()) + " values), elsewhere " : std::string()) +
 	            Num(settings.sim.dFundingRate * 100, 4) + "% every 8 hours" +
@@ -197,7 +205,8 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 	                  ", first cycle b" + std::to_string(archive.CurrentCycle()));
 
 	InitContext initCtx{Mode::Simulated, bResumed, settings.strSymbol, nFrom, settings.path.strLog, settings.path.strBackup,
-	                    pExchange->GetAccount(), pExchange->GetPosition(), pExchange->GetRules(), logger};
+	                    pExchange->GetAccount(), pExchange->GetPosition(), pExchange->GetPosition(PositionSide::Long),
+	                    pExchange->GetPosition(PositionSide::Short), pExchange->GetRules(), logger};
 	if(!pStrategy->Init(initCtx))
 	{
 		logger.Error("Strategy Init failed: " + pStrategy->GetLastError());
@@ -206,7 +215,7 @@ bool CEngine::Setup(const CSettings& settings, const EngineOptions& options)
 	bStrategyStarted = true;
 
 	logger.Info("Simulation ready: equity " + Num(pExchange->GetAccount().dEquity) + " USDT" +
-	            (pExchange->GetPosition().bOpen ? ", position open" : ""));
+	            (pExchange->AnyOpen() ? ", position open" : ""));
 	tStart = std::chrono::steady_clock::now();
 	ThreadBase::_bInitFailed = false;
 	return true;
@@ -256,12 +265,15 @@ bool CEngine::_Resume(const CSettings& settings)
 	dPeakEquity  = state.dPeakEquity;
 	dMaxDrawdown = state.dMaxDrawdown;
 
+	std::string strPositions;
+	for(const Position* p : {&state.exchange.position, &state.exchange.shortPosition})
+		if(p->bOpen)
+			strPositions += std::string(", ") + (p->eSide == PositionSide::Long ? "long " : "short ") + Num(p->dQty, 6) +
+			                " at average price " + Num(p->dAvgPrice);
 	logger.Info("Resuming from " + strStateFile + ": candle " +
 	            (state.nCandleTime >= 0 ? TimeUtils::Format(state.nCandleTime) : std::string("initial")) +
 	            ", step " + std::to_string(state.nStep) + ", balance " + Num(state.exchange.dWallet) +
-	            (state.exchange.position.bOpen ? ", position open: " + Num(state.exchange.position.dQty, 6) +
-	                                             " at average price " + Num(state.exchange.position.dAvgPrice)
-	                                           : std::string(", no position")));
+	            (strPositions.empty() ? std::string(", no position") : strPositions));
 	return true;
 }
 
@@ -305,10 +317,12 @@ void CEngine::run()
 	if(step.bFirstTick)
 		pExchange->ApplyFunding(step.nCandleTime, step.dPrice);
 
+	//new price: orders reached, then liquidation
 	pExchange->Refresh(step.nTime, step.dPrice);
 	ctx.vFills = pExchange->TakeFills();
-	for(const Fill& fill : ctx.vFills)
-		_OnFill(fill);
+	if(!ctx.vFills.empty())
+		bSaveNow = true;
+	_ProcessEvents();
 
 	ctx.nStep++;
 	ctx.nTime         = step.nTime;
@@ -316,12 +330,19 @@ void CEngine::run()
 	ctx.lastCandle    = step.lastCandle;
 	ctx.bCandleClosed = step.bCandleClosed;
 	ctx.bLiquidated   = pExchange->TakeLiquidated();
-	if(ctx.bLiquidated)
-		_OnLiquidation();
 	_UpdateContext();
-	archive.OnStep(ctx.account, ctx.position);
+	{
+		//leverage of the cycle: value of the open positions (long and short) over the initial capital of the cycle
+		double dNotional = 0;
+		for(const Position* p : {&ctx.longPosition, &ctx.shortPosition})
+			if(p->bOpen)
+				dNotional += p->dQty * p->dAvgPrice;
+		archive.OnStep(ctx.account, dNotional);
+	}
 
-	if(!bLiquidation && !bUnderwater && ctx.position.bOpen && ctx.account.dEquity < 0)
+	//without liquidation the position stays open even with the account below zero:
+	//on a real exchange it would already have been closed, the result is not realistic
+	if(!bLiquidation && !bUnderwater && pExchange->AnyOpen() && ctx.account.dEquity < 0)
 	{
 		bUnderwater = true;
 		++nUnderwater;
@@ -340,6 +361,27 @@ void CEngine::run()
 		dPeakEquity = dEquity;
 	else if(dPeakEquity > 0 && (dEquity / dPeakEquity - 1.0) * 100.0 < dMaxDrawdown)
 		dMaxDrawdown = (dEquity / dPeakEquity - 1.0) * 100.0;
+
+	if(fnCandle && step.bCandleClosed)
+	{
+		const Account& account = pExchange->GetAccount();
+		const Position& l = pExchange->GetPosition(PositionSide::Long);
+		const Position& s = pExchange->GetPosition(PositionSide::Short);
+		CandleInfo candle;
+		candle.nTime     = step.lastCandle.nTime;
+		candle.dOpen     = step.lastCandle.dOpen;
+		candle.dHigh     = step.lastCandle.dHigh;
+		candle.dLow      = step.lastCandle.dLow;
+		candle.dClose    = step.lastCandle.dClose;
+		candle.dEquity   = account.dEquity;
+		candle.dWallet   = account.dWallet;
+		candle.dDrawdown = (dPeakEquity > 0) ? (dEquity / dPeakEquity - 1.0) * 100.0 : 0;
+		candle.dLongQty  = l.bOpen ? l.dQty : 0;
+		candle.dLongAvg  = l.bOpen ? l.dAvgPrice : 0;
+		candle.dShortQty = s.bOpen ? s.dQty : 0;
+		candle.dShortAvg = s.bOpen ? s.dAvgPrice : 0;
+		fnCandle(candle);
+	}
 
 	if(fnProgress && nProgressEvery > 0 && ctx.nStep % nProgressEvery == 0)
 	{
@@ -369,7 +411,7 @@ void CEngine::run()
 		_Finish(false, "the strategy asked to stop");
 		return;
 	}
-	if(!pExchange->GetPosition().bOpen && pExchange->GetAccount().dWallet < dMinNotional)
+	if(!pExchange->AnyOpen() && pExchange->GetAccount().dWallet < dMinNotional)
 	{
 		_Finish(false, "capital " + Num(pExchange->GetAccount().dWallet) + " USDT below the minimum order");
 		return;
@@ -379,48 +421,73 @@ void CEngine::run()
 		_PrintStatus(false);
 }
 
-void CEngine::_OnLiquidation()
+//events of the exchange in order: an opening with a cycle just closed archives it first
+//(the opening belongs to the new cycle); the end of a cycle stays pending until the end of
+//the step, so the log lines written by the strategy in that step end up in its backup
+void CEngine::_ProcessEvents()
 {
-	const CSimExchange::Liquidation& liq = pExchange->GetLastLiquidation();
-	const Position& p = liq.positionBefore;
-
-	logger.Error("LIQUIDATION at " + Num(liq.dPrice) + ": position of " + Num(p.dQty, 6) + " at average price " +
-	             Num(p.dAvgPrice) + " (liquidation price " + Num(p.dLiquidationPrice) + "), balance -> " +
-	             Num(liq.dWalletAfter) + " USDT");
-
-	pendingClose.bPending       = true;
-	pendingClose.dExitPrice     = liq.dPrice;
-	pendingClose.dFee           = 0;
-	pendingClose.positionBefore = p;
-	pendingClose.strReason      = "liquidation";
-	bSaveNow = true;
-}
-
-void CEngine::_OnFill(const Fill& fill)
-{
-	if(fill.eSide == OrderSide::Buy)
+	for(const ExchangeEvent& e : pExchange->TakeEvents())
 	{
-		if(pendingClose.bPending)
-			_ArchiveCycle();
-		OrderResult r;
-		r.bOk        = true;
-		r.dFillPrice = fill.dPrice;
-		r.dQty       = fill.dQty;
-		r.dFee       = fill.dFee;
-		r.eType      = fill.eType;
-		r.dFeeRate   = fill.dFeeRate;
-		r.nOrderId   = fill.nOrderId;
-		archive.OnBuy(fill.nTime, r, fill.dWalletBefore);
+		const Position& p = e.positionBefore;
+		const char* pszSide = e.eSide == PositionSide::Long ? "long" : "short";
+		if(fnFill && e.eKind != ExchangeEvent::Kind::Flat)
+		{
+			FillInfo fill;
+			fill.nTime        = e.nTime;
+			fill.nOrderId     = e.nOrderId;
+			fill.eSide        = e.eSide;
+			fill.pszAction    = e.eKind == ExchangeEvent::Kind::Open        ? "open"
+			                  : e.eKind == ExchangeEvent::Kind::Reduce      ? "reduce"
+			                  : e.eKind == ExchangeEvent::Kind::Close       ? "close"
+			                  : e.eKind == ExchangeEvent::Kind::Liquidation ? "liquidation" : "partial_liquidation";
+			fill.eType        = e.eType;
+			fill.dPrice       = e.dPrice;
+			fill.dQty         = e.dQty;
+			fill.dFee         = e.dFee;
+			fill.dPnL         = e.dPnL;
+			fill.dPositionQty = e.dPositionQty;
+			fill.dAvgPrice    = e.dAvgPrice;
+			fill.dWallet      = e.dWalletAfter;
+			fill.dFunding     = (e.eKind == ExchangeEvent::Kind::Close || e.eKind == ExchangeEvent::Kind::Liquidation) ? p.dFundingPaid : 0;
+			fill.strReason    = e.eKind == ExchangeEvent::Kind::Liquidation ? std::string("liquidation") : e.strReason;
+			fnFill(fill);
+		}
+		switch(e.eKind)
+		{
+		case ExchangeEvent::Kind::Open:
+			if(pendingClose.bPending)
+				_ArchiveCycle();
+			archive.OnOpen(e.nTime, e.dPrice, e.dWalletBefore, e.eSide);
+			break;
+
+		case ExchangeEvent::Kind::Flat:
+			if(pendingClose.bPending)
+				_ArchiveCycle();
+			pendingClose.bPending       = true;
+			pendingClose.dExitPrice     = e.dPrice;
+			pendingClose.dFee           = e.dCloseFee;
+			pendingClose.dWalletAfter   = e.dWalletAfter;
+			pendingClose.positionBefore = p;
+			pendingClose.strReason      = e.strReason;
+			break;
+
+		case ExchangeEvent::Kind::Liquidation:
+			logger.Error("LIQUIDATION at " + Num(e.dPrice) + ": " + pszSide + " position of " + Num(p.dQty, 6) +
+			             " at average price " + Num(p.dAvgPrice) + " (liquidation price " + Num(p.dLiquidationPrice) +
+			             "), balance -> " + Num(e.dWalletAfter) + " USDT");
+			break;
+
+		case ExchangeEvent::Kind::PartialLiquidation:
+			logger.Warning("Partial liquidation at " + Num(e.dPrice) + ": " + pszSide + " position reduced by " +
+			               Num(e.dQty, 6) + " (from " + Num(p.dQty, 6) + "), balance -> " + Num(e.dWalletAfter) + " USDT");
+			break;
+
+		case ExchangeEvent::Kind::Reduce:
+		case ExchangeEvent::Kind::Close:
+			break;
+		}
+		bSaveNow = true;
 	}
-	else
-	{
-		pendingClose.bPending       = true;
-		pendingClose.dExitPrice     = fill.dPrice;
-		pendingClose.dFee           = fill.dFee;
-		pendingClose.positionBefore = pExchange->GetLastClosed();
-		pendingClose.strReason      = "limit";
-	}
-	bSaveNow = true;
 }
 
 void CEngine::_ArchiveCycle()
@@ -430,7 +497,7 @@ void CEngine::_ArchiveCycle()
 
 	std::string strError;
 	const std::string strSummary = archive.Close(ctx.nTime, pendingClose.dExitPrice, pendingClose.positionBefore,
-	                                             pendingClose.dFee, pExchange->GetAccount().dWallet,
+	                                             pendingClose.dFee, pendingClose.dWalletAfter,
 	                                             pendingClose.strReason, strError);
 	logger.Info(strSummary);
 
@@ -445,10 +512,16 @@ void CEngine::_ArchiveCycle()
 
 void CEngine::_ArchiveOpenCycle()
 {
-	const Position& position = pExchange->GetPosition();
-	if(!bArchiveOpenCycle || !position.bOpen)
+	if(!bArchiveOpenCycle || !pExchange->AnyOpen())
 		return;
 
+	//the open position (the long if there are two) with the fees and funding of the whole cycle
+	const Position& longPosition = pExchange->GetPosition(PositionSide::Long);
+	Position position = longPosition.bOpen ? longPosition : pExchange->GetPosition(PositionSide::Short);
+	position.dFeesPaid    = pExchange->CycleFees();
+	position.dFundingPaid = pExchange->CycleFunding();
+
+	//no order: the cycle is valued at the final price
 	std::string strError;
 	const std::string strSummary = archive.Close(ctx.nTime, ctx.dPrice, position, 0, pExchange->GetAccount().dEquity,
 	                                             "open at end of simulation", strError);
@@ -463,8 +536,11 @@ void CEngine::_ArchiveOpenCycle()
 
 void CEngine::_UpdateContext()
 {
-	ctx.account  = pExchange->GetAccount();
-	ctx.position = pExchange->GetPosition();
+	ctx.account       = pExchange->GetAccount();
+	ctx.position      = pExchange->GetPosition();
+	ctx.longPosition  = pExchange->GetPosition(PositionSide::Long);
+	ctx.shortPosition = pExchange->GetPosition(PositionSide::Short);
+	//the list of open orders is copied again only when it changes
 	if(pExchange->OrdersVersion() != nOrdersVersion)
 	{
 		ctx.vOpenOrders = pExchange->GetOpenOrders();
@@ -477,7 +553,8 @@ void CEngine::_PrintStatus(bool bForce)
 	std::cout << "\r[" << TimeUtils::Format(ctx.nTime) << "] " << Num(pFeed->Progress() * 100, 1) << "%"
 	          << " | price " << Num(ctx.dPrice)
 	          << " | equity " << Num(ctx.account.dEquity)
-	          << " | position " << (ctx.position.bOpen ? "open" : "closed") << "      ";
+	          << " | position " << (ctx.longPosition.bOpen && ctx.shortPosition.bOpen ? "long and short"
+	                                 : ctx.longPosition.bOpen ? "long" : ctx.shortPosition.bOpen ? "short" : "closed") << "      ";
 	if(bForce)
 		std::cout << std::endl;
 	else
@@ -516,10 +593,14 @@ void CEngine::_Finish(bool bError, const std::string& strReason)
 		", fees " + Num(stats.dFeesPaid) + " USDT" +
 		(stats.nLimitOrders > 0 ? " (maker " + Num(stats.dMakerFees) + " USDT on " + std::to_string(stats.nLimitFills) +
 		                          " limit fills, taker " + Num(stats.dFeesPaid - stats.dMakerFees) + " USDT)" : std::string()) +
+		(stats.nStopOrders > 0 ? ", stops triggered " + std::to_string(stats.nStopFills) + " of " +
+		                         std::to_string(stats.nStopOrders) : std::string()) +
+		(stats.nPartialLiquidations > 0 ? ", partial liquidations " + std::to_string(stats.nPartialLiquidations)
+		                                : std::string()) +
 		", funding " + Num(stats.dFundingPaid) + " USDT" +
 		(nUnderwater > 0 ? ", cycles with equity below zero " + std::to_string(nUnderwater) +
 		                   " (" CFG_SIM_LIQUIDATION " = 0: result not realistic)" : std::string()) +
-		(pExchange->GetPosition().bOpen ? (bArchiveOpenCycle ? ", last cycle still open (archived)"
+		(pExchange->AnyOpen() ? (bArchiveOpenCycle ? ", last cycle still open (archived)"
 		                                                     : ", cycle " + std::to_string(archive.CurrentCycle()) + " still open (kept in Log)")
 		                                : "") +
 		"; " + std::to_string(nSteps) + " steps in " + Num(dSec, 1) + " s (" +
@@ -557,7 +638,7 @@ void CEngine::_Finish(bool bError, const std::string& strReason)
 	result.dFunding            = stats.dFundingPaid;
 	result.dWorstCycleDrawdown = totals.dWorstDrawdown;
 	result.dMaxLeverage        = totals.dMaxLeverage;
-	result.bOpenAtEnd          = pExchange->GetPosition().bOpen;
+	result.bOpenAtEnd          = pExchange->AnyOpen();
 	result.nUnderwater         = nUnderwater;
 	result.nSteps              = nSteps;
 	result.dSeconds            = dSec;
@@ -571,64 +652,68 @@ void CEngine::_Finish(bool bError, const std::string& strReason)
 	ThreadBase::stop();
 }
 
-OrderResult CEngine::COrderRouter::MarketBuy(double dUsdt, double dLeverage)
+OrderResult CEngine::COrderRouter::_After(const OrderResult& r)
 {
-	if(engine.pendingClose.bPending)
-		engine._ArchiveCycle();
-
-	const double dWalletBefore = engine.pExchange->GetAccount().dWallet;
-	const OrderResult r = engine.pExchange->MarketBuy(dUsdt, dLeverage);
 	if(r.bOk)
-	{
-		engine.archive.OnBuy(engine.ctx.nTime, r, dWalletBefore);
 		engine.bSaveNow = true;
-	}
+	engine._ProcessEvents();
 	engine._UpdateContext();
 	return r;
+}
+
+OrderResult CEngine::COrderRouter::MarketBuy(double dUsdt, double dLeverage)
+{
+	return _After(engine.pExchange->MarketBuy(dUsdt, dLeverage));
+}
+
+OrderResult CEngine::COrderRouter::MarketSell(double dUsdt, double dLeverage)
+{
+	return _After(engine.pExchange->MarketSell(dUsdt, dLeverage));
 }
 
 OrderResult CEngine::COrderRouter::Close()
 {
-	const Position positionBefore = engine.pExchange->GetPosition();
-	const OrderResult r = engine.pExchange->Close();
-	if(r.bOk)
-	{
-		engine.pendingClose.bPending       = true;
-		engine.pendingClose.dExitPrice     = r.dFillPrice;
-		engine.pendingClose.dFee           = r.dFee;
-		engine.pendingClose.positionBefore = positionBefore;
-		engine.pendingClose.strReason      = "strategy";
-		engine.bSaveNow = true;
-	}
-	engine._UpdateContext();
-	return r;
+	return _After(engine.pExchange->Close());
+}
+
+OrderResult CEngine::COrderRouter::ClosePosition(PositionSide eSide)
+{
+	return _After(engine.pExchange->ClosePosition(eSide));
+}
+
+OrderResult CEngine::COrderRouter::Reduce(PositionSide eSide, double dQty)
+{
+	return _After(engine.pExchange->Reduce(eSide, dQty));
 }
 
 OrderResult CEngine::COrderRouter::LimitBuy(double dPrice, double dUsdt, double dLeverage)
 {
-	const OrderResult r = engine.pExchange->LimitBuy(dPrice, dUsdt, dLeverage);
-	if(r.bOk)
-		engine.bSaveNow = true;
-	engine._UpdateContext();
-	return r;
+	return _After(engine.pExchange->LimitBuy(dPrice, dUsdt, dLeverage));
+}
+
+OrderResult CEngine::COrderRouter::LimitSell(double dPrice, double dUsdt, double dLeverage)
+{
+	return _After(engine.pExchange->LimitSell(dPrice, dUsdt, dLeverage));
 }
 
 OrderResult CEngine::COrderRouter::LimitClose(double dPrice)
 {
-	const OrderResult r = engine.pExchange->LimitClose(dPrice);
-	if(r.bOk)
-		engine.bSaveNow = true;
-	engine._UpdateContext();
-	return r;
+	return _After(engine.pExchange->LimitClose(dPrice));
+}
+
+OrderResult CEngine::COrderRouter::LimitReduce(PositionSide eSide, double dPrice, double dQty)
+{
+	return _After(engine.pExchange->LimitReduce(eSide, dPrice, dQty));
+}
+
+OrderResult CEngine::COrderRouter::StopClose(PositionSide eSide, double dTrigger, double dQty)
+{
+	return _After(engine.pExchange->StopClose(eSide, dTrigger, dQty));
 }
 
 OrderResult CEngine::COrderRouter::Move(long long nOrderId, double dPrice)
 {
-	const OrderResult r = engine.pExchange->Move(nOrderId, dPrice);
-	if(r.bOk)
-		engine.bSaveNow = true;
-	engine._UpdateContext();
-	return r;
+	return _After(engine.pExchange->Move(nOrderId, dPrice));
 }
 
 bool CEngine::COrderRouter::Cancel(long long nOrderId)

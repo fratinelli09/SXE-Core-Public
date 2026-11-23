@@ -18,14 +18,15 @@ r = sxe.run("Target/Config/EngineConfig.ini", files=False)
 print(f"return {r.return_pct:+.2f}%, max drawdown {r.max_drawdown_pct:.2f}%")
 ```
 
-Windows package ready to run in every [release](https://github.com/fratinelli09/SXE-Core/releases/latest).
-31 tests in CI on Linux arm64 and Windows x64. Version 1.6.0 ([CHANGELOG](CHANGELOG.md)) -
+Windows package ready to run in every [release](https://github.com/fratinelli09/SXE-Core-Public/releases/latest).
+53 tests in CI on Linux arm64 and Windows x64. Version 2.2.0 ([CHANGELOG](CHANGELOG.md)) -
 [Italian version](README_IT.md)
 
 The strategy is compiled as a separate shared library (`.so` on Linux, `.dll` on Windows)
 and knows nothing about where its prices come from. The engine loads it at runtime, checks
 its interface, feeds it market data step by step and executes its orders on a simulated
-exchange that reproduces the rules of a real one: market and limit orders, taker and maker fees, slippage, isolated/cross
+exchange that reproduces the rules of a real one: long and short positions (one-way or hedge),
+market, limit and stop orders, partial closes, taker and maker fees, slippage, isolated/cross
 margin, tiered maintenance margin, funding every 8 hours and liquidation.
 
 
@@ -34,7 +35,8 @@ margin, tiered maintenance margin, funding every 8 hours and liquidation.
 ### Strategies as plug-ins
 Write a class, add one macro, build a shared library. The engine refuses libraries that
 are not strategies or that were built against a different interface version. Strategies can also be
-built outside the project tree with a single CMake function.
+built outside the project tree with a single CMake function, or written in plain C against
+`sxe_strategy.h` and built with any compiler: see [Strategies in C](#strategies-in-c).
 
 ### Deterministic, single-threaded engine
 One step = data -> funding -> exchange -> `Run()` of the strategy.
@@ -43,16 +45,23 @@ Same inputs, same result to the cent: verified by golden tests.
 ### Realistic futures simulation
 Modelled on Bitget BTCUSDT perpetual, all values configurable.
 
-- market orders with taker fee and slippage; limit orders (buy, close) with maker fee and no
-  slippage, filled at their price when the market goes through them by one tick (or just
-  touches them), with the margin of open buy orders reserved
+- long and short positions; one-way mode (an opposite order reduces the position and, if
+  larger, reverses it) or hedge mode (long and short together, each with its own average
+  price, margin and liquidation)
+- market orders with taker fee and slippage; limit orders (buy, sell, close, partial close)
+  with maker fee and no slippage, filled at their price when the market goes through them by
+  one tick (or just touches them), with the margin of open opening orders reserved; stop
+  orders (stop loss, take profit on a trigger) that close at market
+- partial closes (reduce-only): PnL realized on the closed part, margin released in proportion
 - quantity step, minimum quantity, minimum notional
 - isolated or cross margin
 - progressive tiered maintenance margin (each slice of the position pays its tier's rate)
-  and a tier-by-tier liquidation price solver
-- funding every 8 hours from a historical file, with a fallback rate and a stress multiplier
-- liquidation: isolated loses the position margin and continues, cross loses the account
-  and stops
+  and a tier-by-tier liquidation price solver, also for long and short together in cross
+- funding every 8 hours from a historical file, with a fallback rate and a stress multiplier:
+  with a positive rate the long pays and the short receives
+- liquidation: isolated loses the position margin and continues; cross first offsets long
+  and short (hedge) and steps the position down one tier at a time, and only if that is not
+  enough loses the account and stops
 
 ### Intra-candle price path
 Each candle is walked as a sequence of ticks (close only, by candle direction, low first or
@@ -60,7 +69,8 @@ high first) with optional intermediate ticks, so orders and liquidations happen 
 candle. The strategy only sees closed candles: no look-ahead.
 
 ### Cycle archive
-A cycle goes from the first buy to the full close. When it closes, the engine creates
+A cycle goes from the first opening to the moment no position is left open (in one-way,
+reversing the position closes a cycle and opens the next one). When it closes, the engine creates
 `Backup/b<N>` with a `result.txt` summary, moves there all the log files of the cycle and
 appends a row to `total_result.txt`.
 
@@ -132,15 +142,21 @@ synchronously:
 
 | Order | Meaning |
 |---|---|
-| `MarketBuy(usdt, leverage)` | buy at market (taker fee, slippage) |
-| `Close()` | close the whole position at market |
+| `MarketBuy(usdt, leverage)` | buy at market: opens or increases the long (one-way: first reduces an open short) |
+| `MarketSell(usdt, leverage)` | sell at market: opens or increases the short |
+| `Close()` | close every open position at market |
+| `ClosePosition(side)`, `Reduce(side, qty)` | close the position of one side, or a part of it (reduce-only) |
 | `LimitBuy(price, usdt, leverage)` | buy limit below the market (maker fee when filled) |
-| `LimitClose(price)` | close limit of the whole position above the market |
-| `Move(id, price)`, `Cancel(id)`, `CancelAll()` | change or remove open limit orders |
+| `LimitSell(price, usdt, leverage)` | sell limit above the market (opens or increases the short) |
+| `LimitClose(price)` | close limit of the whole position: above the market for a long, below for a short |
+| `LimitReduce(side, price, qty)` | close limit of a part of a position (partial take profit) |
+| `StopClose(side, trigger, qty)` | stop loss or take profit: at the trigger it closes at market (qty 0 = all) |
+| `Move(id, price)`, `Cancel(id)`, `CancelAll()` | change or remove open orders |
 
-Every result says the order type (market or limit), the fee rate and the order id. Open
-limit orders are in `ctx.vOpenOrders`, the limit orders filled since the previous step in
-`ctx.vFills`. On a liquidation the exchange cancels all open orders.
+Every result says the order type (market, limit or stop), the fee rate and the order id. The
+context has `ctx.position` (one-way: the open position, long or short) and `ctx.longPosition`,
+`ctx.shortPosition` (hedge); open orders are in `ctx.vOpenOrders`, the orders filled since the
+previous step in `ctx.vFills`. On a liquidation the exchange cancels the orders of the position.
 
 
 ## Quick start
@@ -289,6 +305,18 @@ A strategy that saves its own state (for example next to its `.ini`) reloads it 
 `InitContext::bResume` is true, that is when the engine resumes a saved simulation. When it
 is false the run starts from scratch and any state left by a previous run must be ignored.
 
+### Strategies in C
+
+[`file/SDK/sxe_strategy.h`](file/SDK/sxe_strategy.h) is a plain C contract between the engine
+and a strategy: a library that exports `sxe_strategy_api_version`, `sxe_strategy_create`,
+`_info`, `_load_config`, `_init`, `_step`, `_term`, `_error` and `_destroy` is loaded like a C++
+strategy. It needs only that header (installed in `Target/Include`, `SXE::Strategy` with
+`find_package(SXE 2.2)`), does not link the engine and can be built with any compiler (MSVC,
+MinGW, clang, gcc) or written in any language that exports C functions. Orders go through the
+functions of `sxe_host` during `sxe_strategy_step()`, with the same results as `ctx.orders`.
+The test strategy is written in C too (`file/Tests/TestStrategy/TestStrategyC.c`) and gives
+the same cycles as the C++ one in every golden test.
+
 
 ## Using SXE Core as a library
 
@@ -345,7 +373,7 @@ With CMake, the build also installs a package: `Target/Include/sxe.h` and
 project uses it with:
 
 ```cmake
-find_package(SXE 1.5 REQUIRED)       # cmake -DCMAKE_PREFIX_PATH=<path>/Target ...
+find_package(SXE 2.2 REQUIRED)       # cmake -DCMAKE_PREFIX_PATH=<path>/Target ...
 add_executable(main main.c)
 target_link_libraries(main PRIVATE SXE::SXE)
 ```
@@ -360,7 +388,10 @@ target_link_libraries(main PRIVATE SXE::SXE)
   (`sxe_engine_load_config`), one by one (`sxe_engine_set`) or both. Same checks as the
   `SXE` program; every error is returned by `sxe_engine_error()`. Relative paths start from
   the folder of `libSXE.so` / `SXE.dll` (`Target/Bin`), like for `SXE`.
-- Callbacks for log messages, progress (every N steps) and every closed cycle.
+- Callbacks for log messages, progress (every N steps), every closed cycle, every fill
+  (`sxe_engine_on_fill`: open, reduce, close, liquidation, partial liquidation) and every
+  closed candle (`sxe_engine_on_candle`: equity, balance, drawdown, long and short positions).
+- `sxe_engine_set_candles()` gives the candles from memory instead of a CSV file.
 - Options to turn off the archive, the state file, the order log and the log files, for
   programs that only need the numbers.
 - `sxe_engine_stop()` from another thread (or from a callback) closes the run normally.
@@ -447,7 +478,7 @@ The tests run the golden references from Python too (`file/Tests/Python`).
 | `[ENGINE]` | mode (SIM), symbol |
 | `[STRATEGY]` | strategy library and its configuration file |
 | `[PATH]` | Log, Backup and historical data folders |
-| `[EXCHANGE]` | margin mode, taker and maker fees, slippage, maintenance margin tiers, quantity step, minimum notional |
+| `[EXCHANGE]` | margin mode, position mode (one-way or hedge), taker and maker fees, slippage, maintenance margin tiers, quantity step, minimum notional |
 | `[SIMULATION]` | date range, initial capital, data and funding files, funding fallback and multiplier, intra-candle path, when a limit order is filled, liquidation on/off, resume, state and order log files |
 | `[LOG]` | info / warning / error / console output |
 
@@ -458,12 +489,12 @@ The tests run the golden references from Python too (`file/Tests/Python`).
 |---|---|
 | `Target/Log/` | files of the cycle in progress: `log.txt`, `error.txt`, order log (type, price, fee and fee rate of every order), strategy files, simulation state |
 | `Target/Backup/b<N>/` | one folder per closed cycle: `result.txt` (open/close, prices, growth, drawdown, max leverage, fees, funding) plus the files moved from Log |
-| `Target/Backup/total_result.txt` | one row per cycle, ready for a spreadsheet |
+| `Target/Backup/total_result.txt` | one row per cycle, ready for a spreadsheet, with the side of the cycle (long, short, long+short) |
 
 
 ## Tests
 
-`./comp_All.sh test` runs 31 tests on fixed real data (`file/Tests/Data`: BTCUSDT 1h and
+`./comp_All.sh test` runs 53 tests on fixed real data (`file/Tests/Data`: BTCUSDT 1h and
 funding, 2023-2024) and on a few hand-made candles:
 
 | Test | Checks |
@@ -481,15 +512,22 @@ funding, 2023-2024) and on a few hand-made candles:
 | `golden_high_first` | extreme intra-candle path: high first |
 | `golden_bitget` | real exchange parameters: tiered maintenance margin, low slippage, funding multiplier |
 | `golden_limit` | limit buy and limit close, the close moved when the average price changes |
+| `golden_short`, `golden_short_crossed`, `golden_short_limit` | the test strategy on the short side: isolated and cross liquidations, limit sell and limit close |
+| `golden_hedge`, `golden_hedge_crossed`, `golden_hedge_stop` | long and short together (hedge): isolated, cross with Bitget tiers and offset, stop loss |
+| `golden_template_both` | the Template long and short (`direction = both`): at every cross the position is reversed |
+| `golden_*_c` | the same golden runs with the test strategy written in C (`sxe_strategy.h`) |
+| `loader_c_incomplete` | the engine rejects a C strategy that does not export every function, saying which |
 | `no_liquidation_warning` | with `liquidation = 0` the engine warns when the equity goes below zero: the result is not realistic |
 | `resume` | a run stopped mid-candle and resumed gives the same cycles as an uninterrupted one |
 | `resume_limit` | the same with open limit orders |
+| `resume_hedge` | the same in hedge with limit and stop orders open on both sides |
 | `limit_through` | hand-made candles: a limit only touched is not filled, one gone through by a tick is filled at its price with the maker fee |
 | `limit_touch` | the same with `limit_fill = touch`: filled as soon as it is touched |
 | `multirun_golden_template` | several engines in one process: a full run, a run that writes no files and 4 runs in parallel give the same numbers |
 | `multirun_golden_isolated` | the same with liquidations |
+| `exchange_positions` | the simulated exchange with values calculated by hand: short, one-way reversal, hedge, liquidation prices, cross offset and tier reduction, partial closes, stops, state saved and reloaded |
 | `api_golden_template`, `api_golden_isolated`, `api_golden_limit` | the same golden runs through the C interface (`libSXE.so` / `SXE.dll`) from a program written in C |
-| `api_checks` | C interface: callbacks, options without files, configuration without files, stop, every error code |
+| `api_checks` | C interface: callbacks (also fills and candles), candles from memory, options without files, configuration without files, stop, every error code |
 | `python_golden_template`, `python_golden_isolated`, `python_golden_limit` | the same golden runs from Python (`sxe.py`) |
 | `python_checks` | `sxe.py`: callbacks, dataclasses, pandas table, `files=False`, exceptions, stop, Ctrl+C, 4 engines in parallel threads |
 | `cmake_package` | a program outside SXE Core built with `find_package(SXE)`: install, configure, build, run |
@@ -514,7 +552,7 @@ SXE_UPDATE_GOLDEN=1 ctest --test-dir CMakeWork -R golden
 | `file/Engine` | the engine loop, strategy loader, cycle archive, state |
 | `file/Exchange` | exchange interface and simulated exchange |
 | `file/DataFeed` | data feed interface and CSV feed with intra-candle ticks |
-| `file/SDK` | the only headers a strategy needs |
+| `file/SDK` | the only headers a strategy needs (C++), and `sxe_strategy.h` (C) |
 | `file/Settings` | configuration and INI reader |
 | `file/Common` | logger, thread, time utilities, shared types |
 | `file/Strategies/Template` | example strategy |
@@ -529,24 +567,26 @@ SXE_UPDATE_GOLDEN=1 ctest --test-dir CMakeWork -R golden
 ## Limits of the public edition
 
 - Simulation only: `mode = REAL` is reserved for live trading, not part of this edition.
-- Long positions with market and limit orders (open/increase, full close), one symbol per run.
+- One symbol per run.
 - Linux and Windows x64; macOS is not tested.
 
 
 ## Public and private edition
 
-This repository is the public edition of SXE Core, kept at the version described here.
-Engine features developed afterwards belong to the author's private edition and are listed
-below. For information about the private edition see [Contact](#contact).
+This repository is the public edition of SXE Core. Since 2.2.0 it has the same engine as the
+author's private edition: the same simulator, the same strategy interfaces (C++ and C), the same
+C and Python interfaces and the same results. The private edition adds the parameter tuning
+and the author's own strategies. For information about the private edition see [Contact](#contact).
 
-### Parameter tuning - available
+### Parameter tuning - private edition
 SXE_Tune, a separate program: it runs many simulations of the same strategy in parallel
-with different parameters and ranks them. SXE keeps running on its own. Grid, random and
-zoom search (wide first, then narrower around the best); rules between parameters written as
-named formulas in `Optimize.ini`, with a summary to check before the start; constraints,
-ranking and the best `.ini` ready for SXE. The best results are then checked on periods not
-used for the tuning and with the neighbouring parameter values: the robust choice is the one
-whose worst case is the highest.
+with different parameters and ranks them. Grid, random and zoom search (wide first, then
+narrower around the best); rules between parameters written as named formulas, with a summary
+to check before the start; constraints, ranking and the best `.ini` ready for SXE. The best
+results are then checked on periods not used for the tuning and with the neighbouring
+parameter values: the robust choice is the one whose worst case is the highest. The public
+engine has what such a program needs: several engines in one process, candles read once and
+shared, runs that write no files.
 
 ### SXE Studio - in development
 SXE Core is being incorporated into SXE Studio, a desktop application for Windows and Linux
@@ -555,8 +595,7 @@ the same asset, on several monitors), candle-by-candle replay of historical data
 and parameter optimisation, all powered by SXE Core, so that strategies are designed, tested
 and tuned in one place and stay private to their author. Historical data are downloaded by
 the user from public sources; nothing is hosted by the project. SXE Core remains a separate
-engine that runs on its own, as a program or as a library. This public edition is kept at
-the version described here.
+engine that runs on its own, as a program or as a library.
 
 
 ## Contact

@@ -202,13 +202,23 @@ bool CSettings::_Load(CReader& ini)
     _Required(ini, CFG_PATH_SECTION, CFG_PATH_BACKUP, path.strBackup);
     path.strLog    = _Resolve(path.strLog);
     path.strBackup = _Resolve(path.strBackup);
-    if (bSimulate && _Required(ini, CFG_PATH_SECTION, CFG_PATH_DATA, path.strData))
+    if (bSimulate && bDataInMemory)
+    {
+        _Optional(ini, CFG_PATH_SECTION, CFG_PATH_DATA, path.strData);
+        if (!path.strData.empty())
+            _CheckFolder(CFG_PATH_SECTION, CFG_PATH_DATA, path.strData = _Resolve(path.strData));
+    }
+    else if (bSimulate && _Required(ini, CFG_PATH_SECTION, CFG_PATH_DATA, path.strData))
         _CheckFolder(CFG_PATH_SECTION, CFG_PATH_DATA, path.strData = _Resolve(path.strData));
 
     _Optional(ini, CFG_EXCHANGE_SECTION, CFG_EXCHANGE_MARGIN_MODE, exchange.strMarginMode);
     if (exchange.strMarginMode != CFG_MARGIN_CROSSED && exchange.strMarginMode != CFG_MARGIN_ISOLATED)
         _AddError(Key(CFG_EXCHANGE_SECTION, CFG_EXCHANGE_MARGIN_MODE) + " = '" + exchange.strMarginMode +
                   "' is not valid (allowed values: " CFG_MARGIN_CROSSED ", " CFG_MARGIN_ISOLATED ")");
+    _Optional(ini, CFG_EXCHANGE_SECTION, CFG_EXCHANGE_POSITION_MODE, exchange.strPositionMode);
+    if (exchange.strPositionMode != CFG_POSITION_ONE_WAY && exchange.strPositionMode != CFG_POSITION_HEDGE)
+        _AddError(Key(CFG_EXCHANGE_SECTION, CFG_EXCHANGE_POSITION_MODE) + " = '" + exchange.strPositionMode +
+                  "' is not valid (allowed values: " CFG_POSITION_ONE_WAY ", " CFG_POSITION_HEDGE ")");
 
     _Optional(ini, CFG_EXCHANGE_SECTION, CFG_EXCHANGE_FEE_TAKER, exchange.dFeeTaker);
     _Optional(ini, CFG_EXCHANGE_SECTION, CFG_EXCHANGE_FEE_MAKER, exchange.dFeeMaker);
@@ -239,7 +249,9 @@ bool CSettings::_Load(CReader& ini)
 
     if (bSimulate)
     {
-        if (_Required(ini, CFG_SIM_SECTION, CFG_SIM_DATA_FILE, sim.strDataFile))
+        if (bDataInMemory)
+            sim.strDataFile.clear();
+        else if (_Required(ini, CFG_SIM_SECTION, CFG_SIM_DATA_FILE, sim.strDataFile))
             _CheckFile(CFG_SIM_SECTION, CFG_SIM_DATA_FILE, sim.strDataFile = ResolvePath(sim.strDataFile, path.strData));
 
         _Optional(ini, CFG_SIM_SECTION, CFG_SIM_FUNDING_FILE, sim.strFundingFile);

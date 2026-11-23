@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(SxePackageTest LANGUAGES C)
 
-find_package(SXE 1.5 REQUIRED)
+find_package(SXE 2.0 REQUIRED)
 
 add_executable(SxePackageTest main.c)
 target_link_libraries(SxePackageTest PRIVATE SXE::SXE)

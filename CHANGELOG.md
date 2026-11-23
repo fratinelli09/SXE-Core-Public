@@ -6,6 +6,72 @@ The strategy interface has its own number (`SXE_API_VERSION` in `file/SDK/Strate
 the engine refuses strategies built for a different one.
 
 
+## 2.2.0 - 2026-11-23
+
+The engine of the private edition 2.2, without the parameter tuning: short positions, the C
+interface for fills and candles, strategies written in C. Strategy interface 4
+(`SXE_API_VERSION`): C++ strategies are rebuilt, and long strategies give the same results.
+The C interface only adds functions and fields (`SXE_C_API_VERSION` 1). Every golden reference
+of 1.6.0 is identical to the bit, apart from the new `SIDE` column.
+
+### Short positions, one-way and hedge (2.0)
+
+- Short positions (`MarketSell`, `LimitSell`), with PnL, liquidation price, funding (with a
+  positive rate the short receives) and slippage on the right side.
+- `[EXCHANGE] position_mode`: `one_way` (one direction at a time: an opposite order reduces
+  the position and, if larger, reverses it; if the margin is not enough for the new part,
+  the whole order is rejected) or `hedge` (long and short together, each with its own
+  margin and liquidation).
+- Partial closes (`Reduce`, `LimitReduce`: PnL realized on the closed part, margin released
+  in proportion), close of one side (`ClosePosition`), stop orders (`StopClose`: stop loss and
+  take profit that close at market when the trigger is reached).
+- Liquidation as on Bitget: isolated, only the position (it loses its margin); crossed, orders
+  cancelled, long and short offset in hedge, then down one tier at a time checking again, and
+  only if that is not enough everything is liquidated with the balance at zero. In cross hedge
+  the maintenance margin counts the side with the higher value.
+- Strategy interface 4: `Position::eSide` and `dRealizedPnL`, `StepContext::longPosition` and
+  `shortPosition` (also in `InitContext`), `ExchangeRules::ePositionMode`, `Sell` orders and
+  `Stop` order type.
+- A cycle goes from the opening of a position until none is left open: `total_result.txt` and
+  `result.txt` have the side of the cycle (`long`, `short`, `long+short`), `sxe_cycle.side` in
+  the C interface and `Cycle.side` in `sxe.py`. The order log has a `side` column. Cycles can
+  also be closed by `stop`.
+- `Template` has `direction = long | short | both` (default long, the same as before).
+
+### C interface: fills, candles, candles from memory (2.1)
+
+- `sxe_engine_on_fill`: every fill (open, reduce, close, liquidation, partial liquidation) with
+  fee, realized PnL, position and balance after, funding of the position at the close.
+- `sxe_engine_on_candle`: at every closed candle OHLC, equity, balance, drawdown, long and
+  short positions.
+- `sxe_engine_set_candles`: the candles given by the program (copied), without `data_file`
+  or `[PATH] data`.
+- Inside the engine the candles read from a CSV (`CandleSeries`) can be shared by several
+  engines in the same process (`EngineOptions::pCandles`): the multi-run test reads them once.
+
+### Strategies in C (2.2)
+
+- `file/SDK/sxe_strategy.h`: a plain C contract between the engine and a strategy, installed in
+  `Target/Include` with the target `SXE::Strategy` in the CMake package (`find_package(SXE 2.2)`).
+  A strategy can export C functions (`sxe_strategy_create`, `_init`, `_step`, ...) instead of
+  the class `CStrategyBase`: it is built with any compiler (MSVC, MinGW, clang, gcc) without
+  linking the engine and can be written in another language. The engine recognises it from
+  `sxe_strategy_api_version` and uses it through `CCStrategy`, which translates contexts and
+  orders. C++ strategies do not change.
+
+### Tests (53 in total)
+
+- `exchange_positions`: the simulated exchange with values calculated by hand (short, one-way
+  reversal, hedge, liquidation prices, cross offset and tier reduction, partial closes, stops,
+  state saved and reloaded).
+- `golden_short`, `golden_short_crossed`, `golden_short_limit`, `golden_hedge`,
+  `golden_hedge_crossed`, `golden_hedge_stop`, `golden_template_both`, `resume_hedge`.
+- The test strategy written in C (`TestStrategyC.c`) gives the same cycles as the C++ one in 12
+  golden tests (`golden_*_c`); `loader_c_incomplete` checks a C library that lacks exports.
+- `api_checks` also checks fills, candles and candles from memory (the same numbers as from
+  the CSV, one fill per executed order).
+
+
 ## 1.6.0 - 2026-10-27
 
 The engine, the C interface and the strategy interface do not change (`SXE_C_API_VERSION` 1,

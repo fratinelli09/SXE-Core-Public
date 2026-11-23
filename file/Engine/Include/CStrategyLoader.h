@@ -16,8 +16,13 @@ public:
 	std::string GetLastError() const { return strLastError; }
 
 private:
+	//library with the C contract (sxe_strategy.h)
+	bool _LoadC(const std::string& strPath);
+
+private:
 	void*          pHandle;
 	SXE_DestroyFn  pfnDestroy;
 	CStrategyBase* pStrategy;
+	bool           bOwned;			//pStrategy is a CCStrategy of the engine: the loader deletes it
 	std::string    strLastError;
 };
