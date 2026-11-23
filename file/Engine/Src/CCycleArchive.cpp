@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 #define TOTAL_RESULT_FILE		"total_result.txt"
 #define CYCLE_RESULT_FILE		"result.txt"
 #define CYCLE_DIR_PREFIX		"b"
-#define TOTAL_RESULT_HEADER		"CYCLE;OPEN;CLOSE;CAPITAL_START;CAPITAL_END;GROWTH%;DRAWDOWN%;MAX_LEVERAGE;BUYS;ENTRY_PRICE;AVG_PRICE;EXIT_PRICE;FEES;FUNDING;CLOSED_BY"
+#define TOTAL_RESULT_HEADER		"CYCLE;OPEN;CLOSE;CAPITAL_START;CAPITAL_END;GROWTH%;DRAWDOWN%;MAX_LEVERAGE;BUYS;ENTRY_PRICE;AVG_PRICE;EXIT_PRICE;FEES;FUNDING;CLOSED_BY;SIDE"
 
 namespace
 {
@@ -38,8 +38,17 @@ CCycleArchive::CCycleArchive():
 	dFirstPrice(0),
 	nBuys(0),
 	dMinEquityPerc(0),
-	dMaxLeverage(0)
+	dMaxLeverage(0),
+	bLong(false),
+	bShort(false)
 {
+}
+
+std::string CCycleArchive::_Side() const
+{
+	if(bLong && bShort)
+		return "long+short";
+	return bShort ? "short" : "long";
 }
 
 bool CCycleArchive::Setup(const std::string& strLog, const std::string& strBackup,
@@ -97,22 +106,25 @@ void CCycleArchive::WriteNote(const std::string& strNote)
 	total << "# " << strNote << "\n";
 }
 
-void CCycleArchive::OnBuy(long long nTime, const OrderResult& r, double dWalletBefore)
+void CCycleArchive::OnOpen(long long nTime, double dFillPrice, double dWalletBefore, PositionSide eSide)
 {
 	if(!bOpen)
 	{
 		bOpen          = true;
 		nOpenTime      = nTime;
 		dWalletStart   = dWalletBefore;
-		dFirstPrice    = r.dFillPrice;
+		dFirstPrice    = dFillPrice;
 		nBuys          = 0;
 		dMinEquityPerc = 0;
 		dMaxLeverage   = 0;
+		bLong          = false;
+		bShort         = false;
 	}
 	++nBuys;
+	(eSide == PositionSide::Long ? bLong : bShort) = true;
 }
 
-void CCycleArchive::OnStep(const Account& account, const Position& position)
+void CCycleArchive::OnStep(const Account& account, double dNotional)
 {
 	if(!bOpen || dWalletStart <= 0)
 		return;
@@ -121,7 +133,7 @@ void CCycleArchive::OnStep(const Account& account, const Position& position)
 	if(dEquityPerc < dMinEquityPerc)
 		dMinEquityPerc = dEquityPerc;
 
-	const double dLeverage = position.dQty * position.dAvgPrice / dWalletStart;
+	const double dLeverage = dNotional / dWalletStart;
 	if(dLeverage > dMaxLeverage)
 		dMaxLeverage = dLeverage;
 }
@@ -137,7 +149,8 @@ std::string CCycleArchive::Close(long long nTime, double dExitPrice, const Posit
 	totals.dMaxLeverage   = std::max(totals.dMaxLeverage, dMaxLeverage);
 	totals.dHours        += (nTime - nOpenTime) / 3600.0;
 
-	const std::string strSummary = "Cycle " + std::to_string(nCycle) + " closed (" + strReason + "): capital " +
+	const std::string strSide = _Side();
+	const std::string strSummary = "Cycle " + std::to_string(nCycle) + " " + strSide + " closed (" + strReason + "): capital " +
 	                               Num(dWalletStart) + " -> " + Num(dWalletAfter) + " (" + Num(dGrowth) + "%), buys " +
 	                               std::to_string(nBuys) + ", drawdown max " + Num(dMinEquityPerc) + "%, max leverage " +
 	                               Num(dMaxLeverage);
@@ -161,6 +174,7 @@ std::string CCycleArchive::Close(long long nTime, double dExitPrice, const Posit
 		row.dFees         = dFees;
 		row.dFunding      = positionBefore.dFundingPaid;
 		row.strClosedBy   = strReason;
+		row.strSide       = strSide;
 		fnCycle(row);
 	}
 
@@ -180,6 +194,7 @@ std::string CCycleArchive::Close(long long nTime, double dExitPrice, const Posit
 		       << "open            = " << TimeUtils::Format(nOpenTime) << "\n"
 		       << "close           = " << TimeUtils::Format(nTime) << " (" << strReason << ")\n"
 		       << "duration_hours  = " << Num((nTime - nOpenTime) / 3600.0, 1) << "\n"
+		       << "side            = " << strSide << "\n"
 		       << "buys            = " << nBuys << "\n"
 		       << "entry_price     = " << Num(dFirstPrice) << "\n"
 		       << "avg_price       = " << Num(positionBefore.dAvgPrice) << "\n"
@@ -198,7 +213,7 @@ std::string CCycleArchive::Close(long long nTime, double dExitPrice, const Posit
 		      << Num(dWalletStart) << ";" << Num(dWalletAfter) << ";" << Num(dGrowth) << ";"
 		      << Num(dMinEquityPerc) << ";" << Num(dMaxLeverage) << ";" << nBuys << ";"
 		      << Num(dFirstPrice) << ";" << Num(positionBefore.dAvgPrice) << ";" << Num(dExitPrice) << ";"
-		      << Num(dFees) << ";" << Num(positionBefore.dFundingPaid) << ";" << strReason << "\n";
+		      << Num(dFees) << ";" << Num(positionBefore.dFundingPaid) << ";" << strReason << ";" << strSide << "\n";
 		if(!total && strError.empty())
 			strError = "Cannot update " + strTotalFile;
 	}
@@ -250,6 +265,8 @@ CCycleArchive::Snapshot CCycleArchive::GetSnapshot() const
 	s.nBuys          = nBuys;
 	s.dMinEquityPerc = dMinEquityPerc;
 	s.dMaxLeverage   = dMaxLeverage;
+	s.bLong          = bLong;
+	s.bShort         = bShort;
 	return s;
 }
 
@@ -262,4 +279,6 @@ void CCycleArchive::Restore(const Snapshot& s)
 	nBuys          = s.nBuys;
 	dMinEquityPerc = s.dMinEquityPerc;
 	dMaxLeverage   = s.dMaxLeverage;
+	bLong          = s.bLong;
+	bShort         = s.bShort;
 }

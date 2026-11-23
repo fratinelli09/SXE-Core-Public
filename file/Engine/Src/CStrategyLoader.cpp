@@ -1,5 +1,7 @@
 #include "CStrategyLoader.h"
 
+#include "CCStrategy.h"
+
 #include <filesystem>
 #include <system_error>
 
@@ -67,7 +69,8 @@ namespace
 CStrategyLoader::CStrategyLoader():
 	pHandle(nullptr),
 	pfnDestroy(nullptr),
-	pStrategy(nullptr)
+	pStrategy(nullptr),
+	bOwned(false)
 {
 }
 
@@ -94,6 +97,10 @@ bool CStrategyLoader::Load(const std::string& strPath)
 		return false;
 	}
 
+	//C contract (sxe_strategy.h)
+	if(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_VERSION))
+		return _LoadC(strPath);
+
 	auto pfnVersion = reinterpret_cast<SXE_ApiVersionFn>(FindSymbol(pHandle, SXE_SYMBOL_API_VERSION));
 	auto pfnCreate  = reinterpret_cast<SXE_CreateFn>(FindSymbol(pHandle, SXE_SYMBOL_CREATE));
 	pfnDestroy      = reinterpret_cast<SXE_DestroyFn>(FindSymbol(pHandle, SXE_SYMBOL_DESTROY));
@@ -105,7 +112,7 @@ bool CStrategyLoader::Load(const std::string& strPath)
 	if(!strMissing.empty())
 	{
 		strLastError = "Not an SXE strategy, missing functions:" + strMissing +
-		               " (SXE_EXPORT_STRATEGY missing in the .cpp?)";
+		               " (SXE_EXPORT_STRATEGY missing in the .cpp?, or " SXE_STRATEGY_SYMBOL_VERSION " for the C contract)";
 		Unload();
 		return false;
 	}
@@ -131,11 +138,67 @@ bool CStrategyLoader::Load(const std::string& strPath)
 	return true;
 }
 
+bool CStrategyLoader::_LoadC(const std::string& strPath)
+{
+	auto pfnVersion = reinterpret_cast<sxe_strategy_api_version_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_VERSION));
+
+	CCStrategy::Functions fn;
+	fn.pfnCreate     = reinterpret_cast<sxe_strategy_create_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_CREATE));
+	fn.pfnInfo       = reinterpret_cast<sxe_strategy_info_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_INFO));
+	fn.pfnLoadConfig = reinterpret_cast<sxe_strategy_load_config_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_LOAD_CONFIG));
+	fn.pfnInit       = reinterpret_cast<sxe_strategy_init_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_INIT));
+	fn.pfnStep       = reinterpret_cast<sxe_strategy_step_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_STEP));
+	fn.pfnTerm       = reinterpret_cast<sxe_strategy_term_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_TERM));
+	fn.pfnError      = reinterpret_cast<sxe_strategy_error_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_ERROR));
+	fn.pfnDestroy    = reinterpret_cast<sxe_strategy_destroy_fn>(FindSymbol(pHandle, SXE_STRATEGY_SYMBOL_DESTROY));
+
+	std::string strMissing;
+	if(!fn.pfnCreate)     strMissing += " " SXE_STRATEGY_SYMBOL_CREATE;
+	if(!fn.pfnInfo)       strMissing += " " SXE_STRATEGY_SYMBOL_INFO;
+	if(!fn.pfnLoadConfig) strMissing += " " SXE_STRATEGY_SYMBOL_LOAD_CONFIG;
+	if(!fn.pfnInit)       strMissing += " " SXE_STRATEGY_SYMBOL_INIT;
+	if(!fn.pfnStep)       strMissing += " " SXE_STRATEGY_SYMBOL_STEP;
+	if(!fn.pfnTerm)       strMissing += " " SXE_STRATEGY_SYMBOL_TERM;
+	if(!fn.pfnError)      strMissing += " " SXE_STRATEGY_SYMBOL_ERROR;
+	if(!fn.pfnDestroy)    strMissing += " " SXE_STRATEGY_SYMBOL_DESTROY;
+	if(!strMissing.empty())
+	{
+		strLastError = "Incomplete strategy with the C contract: " + strPath + ", missing functions:" + strMissing;
+		Unload();
+		return false;
+	}
+
+	const int nVersion = pfnVersion();
+	if(nVersion != SXE_STRATEGY_API_VERSION)
+	{
+		strLastError = "Strategy built for version " + std::to_string(nVersion) + " of the C contract, the engine uses version " +
+		               std::to_string(SXE_STRATEGY_API_VERSION) + ": rebuild it";
+		Unload();
+		return false;
+	}
+
+	auto* pC = new CCStrategy(fn);
+	pStrategy = pC;
+	bOwned    = true;
+	if(!pC->Create())
+	{
+		strLastError = pC->GetLastError();
+		Unload();
+		return false;
+	}
+
+	strLastError.clear();
+	return true;
+}
+
 void CStrategyLoader::Unload()
 {
-	if(pStrategy && pfnDestroy)
+	if(pStrategy && bOwned)
+		delete pStrategy;
+	else if(pStrategy && pfnDestroy)
 		pfnDestroy(pStrategy);
 	pStrategy  = nullptr;
+	bOwned     = false;
 	pfnDestroy = nullptr;
 
 	if(pHandle)

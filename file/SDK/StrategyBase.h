@@ -3,7 +3,7 @@
 
 #include "Context.h"
 
-#define SXE_API_VERSION 3
+#define SXE_API_VERSION 4
 
 enum class RunResult
 {

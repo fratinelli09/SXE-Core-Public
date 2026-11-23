@@ -22,19 +22,25 @@ the library).
 ### Engine/ -> libEngine.so
 The engine.
 - `CEngine`: single thread, every step data -> exchange -> `Run()` of the strategy.
-- `CStrategyLoader`: opens the strategy library and checks its interface.
+- `CStrategyLoader`: opens the strategy library and checks its interface (C++ class or C
+  contract).
+- `CCStrategy`: a strategy with the C contract (`sxe_strategy.h`) as the engine sees it: turns
+  the contexts into the C structures and the orders into calls to `IOrders`.
 - `CCycleArchive`: at the end of a cycle creates `Backup/b<N>`, moves the Log files and
   updates `total_result.txt`.
 - `CSimStateFile`: saves and reloads the simulation state (`last_row.txt`) for resume.
 
 ### Exchange/ -> libExchange.so
-- `IExchange`: the exchange as seen by the engine.
-- `CSimExchange`: simulated exchange (market and limit orders, taker and maker fees,
-  slippage, margin, tiered maintenance margin, funding every 8 hours, liquidation).
+- `IExchange`: the exchange as seen by the engine, with the events for the cycle archive
+  (`ExchangeEvent`).
+- `CSimExchange`: simulated exchange (long and short, one-way and hedge, isolated and cross,
+  market, limit and stop orders, reductions, taker and maker fees, slippage, tiered maintenance
+  margin, funding every 8 hours, tiered liquidation).
 
 ### DataFeed/ -> libDataFeed.so
 - `IDataFeed`: where prices come from.
-- `CCsvFeed`: candles from CSV, walked as ticks inside the candle.
+- `CCsvFeed`: candles from CSV (or given from memory, `CandleSeries`, shared by several
+  engines), walked as ticks inside the candle.
 
 ### Settings/ -> libSettings.so
 - `CSettings`: reads and validates `EngineConfig.ini`.
@@ -47,10 +53,12 @@ The engine.
 
 ### SDK/ (headers only)
 Boundary between engine and strategy: `CStrategyBase` (`GetInfo`, `LoadConfig`, `Init`,
-`Run`, `Term`), `InitContext` / `StepContext`, `SXE_EXPORT_STRATEGY` macro.
+`Run`, `Term`), `InitContext` / `StepContext`, `SXE_EXPORT_STRATEGY` macro; `sxe_strategy.h`,
+the same contract in plain C for strategies built with any compiler.
 
 ### Strategies/Template/ -> libTemplate.so
-Example strategy (moving-average crossover), configured by `Target/Config/Template.ini`.
+Example strategy (moving-average crossover, long, short or both), configured by
+`Target/Config/Template.ini`.
 Starting point for a new strategy.
 
 ### Strategies/SimpleDca/ -> libSimpleDca.so
@@ -63,9 +71,11 @@ Every folder of `Strategies` with a `CMakeLists.txt` is built automatically; if 
 
 ### Tests/ (CTest tests)
 `SxeTest.cmake` runs the tests; `Data/` fixed real data (BTCUSDT 1h and funding 2023-2024);
-`Golden/` expected results; `TestStrategy/` test strategy and a library with a wrong
-interface; `Api/` and `Python/` the C interface and `sxe.py`; `Package/` a program outside
-SXE Core that uses it with `find_package(SXE)`. Run them with `./comp_All.sh test`.
+`Golden/` expected results; `TestStrategy/` test strategy (long, short or both, stop loss) in
+C++ and in C, and libraries with a wrong or incomplete interface; `Exchange/` test of the
+simulated exchange with values calculated by hand; `MultiRun/` several engines in one process;
+`Api/` and `Python/` the C interface and `sxe.py`; `Package/` a program outside SXE Core that
+uses it with `find_package(SXE)`. Run them with `./comp_All.sh test`.
 
 ## Dependencies
 

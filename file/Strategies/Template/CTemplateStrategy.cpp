@@ -13,6 +13,7 @@
 #define TEMPLATE_SLOW_PERIOD	"slow_period"
 #define TEMPLATE_ORDER_PERC		"order_perc"
 #define TEMPLATE_LEVERAGE		"leverage"
+#define TEMPLATE_DIRECTION		"direction"
 #define TEMPLATE_CYCLE_FILE		"Template.txt"
 
 namespace
@@ -33,6 +34,8 @@ CTemplateStrategy::CTemplateStrategy():
 	nSlowPeriod(50),
 	dOrderPerc(50),
 	dLeverage(1),
+	bLong(true),
+	bShort(false),
 	nCount(0),
 	dSumFast(0),
 	dSumSlow(0),
@@ -52,7 +55,7 @@ CTemplateStrategy::~CTemplateStrategy()
 
 StrategyInfo CTemplateStrategy::GetInfo() const
 {
-	return StrategyInfo{"Template", "1.0", "example: moving-average crossover"};
+	return StrategyInfo{"Template", "2.0", "example: moving-average crossover"};
 }
 
 bool CTemplateStrategy::LoadConfig(const std::string& strConfigFile)
@@ -84,6 +87,17 @@ bool CTemplateStrategy::LoadConfig(const std::string& strConfigFile)
 		strLastError = "required: 0 < " TEMPLATE_ORDER_PERC " <= 100 and " TEMPLATE_LEVERAGE " >= 1";
 		return false;
 	}
+
+	//optional: long (default), short, both
+	std::string strDirection = "long";
+	ini.Get(TEMPLATE_SECTION, TEMPLATE_DIRECTION, strDirection);
+	bLong  = strDirection == "long" || strDirection == "both";
+	bShort = strDirection == "short" || strDirection == "both";
+	if(!bLong && !bShort)
+	{
+		strLastError = TEMPLATE_DIRECTION " = " + strDirection + " is not valid (long, short, both)";
+		return false;
+	}
 	return true;
 }
 
@@ -102,6 +116,7 @@ bool CTemplateStrategy::Init(const InitContext& ctx)
 
 	pLog->Info("Template: averages " + std::to_string(nFastPeriod) + "/" + std::to_string(nSlowPeriod) +
 	           ", order " + Num(dOrderPerc) + "% of the available balance, leverage " + Num(dLeverage) +
+	           ", " + (bLong && bShort ? "long and short" : bShort ? "short only" : "long only") +
 	           ", " + ctx.strSymbol + " from " + TimeUtils::Format(ctx.nStartTime));
 
 	if(ctx.position.bOpen)
@@ -151,48 +166,70 @@ RunResult CTemplateStrategy::Run(StepContext& ctx)
 	bFastAbove   = bAbove;
 	bHasPrevious = true;
 
-	if(bCrossUp && !ctx.position.bOpen)
+	//cross upwards: closes the short, opens the long; downwards the opposite
+	if(bCrossUp)
 	{
-		const double dUsdt = ctx.account.dAvailable * dOrderPerc / 100.0;
-		const double dWallet = ctx.account.dWallet;
-		const OrderResult r = ctx.orders.MarketBuy(dUsdt, dLeverage);
-		if(r.bOk)
-		{
-			dWalletAtOpen = dWallet;
-			const std::string strLine = "OPENED " + Num(r.dQty, 4) + " at " + Num(r.dFillPrice) + " (" + Num(dUsdt) +
-			                            " USDT, averages " + Num(dFast) + " > " + Num(dSlow) + ")";
-			pLog->Info("Template: " + strLine);
-			_WriteCycleFile("[" + TimeUtils::Format(ctx.nTime) + "] cycle " + std::to_string(ctx.nCycle) + " " + strLine);
-			pLog->ClearOnce();
-		}
-		else
-		{
-			pLog->WarningOnce("Template: opening rejected (" + r.strError + ")");
-		}
+		if(ctx.position.bOpen && ctx.position.eSide == PositionSide::Short)
+			_Close(ctx, dFast, dSlow);
+		if(bLong && !ctx.position.bOpen)
+			_Open(ctx, PositionSide::Long, dFast, dSlow);
 	}
-	else if(bCrossDown && ctx.position.bOpen)
+	else if(bCrossDown)
 	{
-		const OrderResult r = ctx.orders.Close();
-		if(r.bOk)
-		{
-			const double dPnL = ctx.account.dWallet - dWalletAtOpen;
-			++nTrades;
-			if(dPnL > 0)
-				++nWins;
-
-			const std::string strLine = "CLOSED at " + Num(r.dFillPrice) + " (averages " + Num(dFast) + " < " + Num(dSlow) +
-			                            "), result " + Num(dPnL) + " USDT, balance " + Num(ctx.account.dWallet);
-			pLog->Info("Template: " + strLine);
-			_WriteCycleFile("[" + TimeUtils::Format(ctx.nTime) + "] cycle " + std::to_string(ctx.nCycle) + " " + strLine);
-		}
-		else
-		{
-			pLog->WarningOnce("Template: closing rejected (" + r.strError + ")");
-		}
+		if(ctx.position.bOpen && ctx.position.eSide == PositionSide::Long)
+			_Close(ctx, dFast, dSlow);
+		if(bShort && !ctx.position.bOpen)
+			_Open(ctx, PositionSide::Short, dFast, dSlow);
 	}
 
 	dLastWallet = ctx.account.dWallet;
 	return RunResult::Continue;
+}
+
+void CTemplateStrategy::_Open(StepContext& ctx, PositionSide eSide, double dFast, double dSlow)
+{
+	const double dUsdt = ctx.account.dAvailable * dOrderPerc / 100.0;
+	const double dWallet = ctx.account.dWallet;
+	const OrderResult r = eSide == PositionSide::Long ? ctx.orders.MarketBuy(dUsdt, dLeverage)
+	                                                  : ctx.orders.MarketSell(dUsdt, dLeverage);
+	if(r.bOk)
+	{
+		dWalletAtOpen = dWallet;
+		const std::string strLine = std::string(eSide == PositionSide::Long ? "OPENED" : "OPENED SHORT") + " " +
+		                            Num(r.dQty, 4) + " at " + Num(r.dFillPrice) + " (" + Num(dUsdt) + " USDT, averages " +
+		                            Num(dFast) + (eSide == PositionSide::Long ? " > " : " < ") + Num(dSlow) + ")";
+		pLog->Info("Template: " + strLine);
+		_WriteCycleFile("[" + TimeUtils::Format(ctx.nTime) + "] cycle " + std::to_string(ctx.nCycle) + " " + strLine);
+		pLog->ClearOnce();
+	}
+	else
+	{
+		//the same reason at every cross (e.g. capital exhausted): written only once
+		pLog->WarningOnce("Template: opening rejected (" + r.strError + ")");
+	}
+}
+
+void CTemplateStrategy::_Close(StepContext& ctx, double dFast, double dSlow)
+{
+	const bool bLongPosition = ctx.position.eSide == PositionSide::Long;
+	const OrderResult r = ctx.orders.Close();
+	if(r.bOk)
+	{
+		const double dPnL = ctx.account.dWallet - dWalletAtOpen;
+		++nTrades;
+		if(dPnL > 0)
+			++nWins;
+
+		const std::string strLine = "CLOSED at " + Num(r.dFillPrice) + " (averages " + Num(dFast) +
+		                            (bLongPosition ? " < " : " > ") + Num(dSlow) + "), result " + Num(dPnL) +
+		                            " USDT, balance " + Num(ctx.account.dWallet);
+		pLog->Info("Template: " + strLine);
+		_WriteCycleFile("[" + TimeUtils::Format(ctx.nTime) + "] cycle " + std::to_string(ctx.nCycle) + " " + strLine);
+	}
+	else
+	{
+		pLog->WarningOnce("Template: closing rejected (" + r.strError + ")");
+	}
 }
 
 void CTemplateStrategy::_WriteCycleFile(const std::string& strLine)

@@ -8,6 +8,9 @@
  *     sxe_engine_load_config(e, "Target/Config/EngineConfig.ini");   (optional)
  *     sxe_engine_set(e, "SIMULATION", "initial_capital", "10000");    (optional)
  *     sxe_engine_on_cycle(e, my_cycle_callback, my_data);             (optional)
+ *     sxe_engine_on_fill(e, my_fill_callback, my_data);               (optional, 2.1)
+ *     sxe_engine_on_candle(e, my_candle_callback, my_data);           (optional, 2.1)
+ *     sxe_engine_set_candles(e, candles, count, 60);                  (optional, 2.1)
  *     sxe_engine_run(e);
  *     sxe_engine_result(e)->return_pct ...
  *     sxe_engine_destroy(e);
@@ -119,7 +122,8 @@ typedef struct sxe_cycle
     double      exit_price;
     double      fees;
     double      funding;
-    const char* closed_by;      /* "strategy", "liquidation", "open at end of simulation" */
+    const char* closed_by;      /* "strategy", "limit", "stop", "liquidation", "open at end of simulation" */
+    const char* side;           /* "long", "short" or "long+short" (hedge): added in SXE Core 2.0 */
 } sxe_cycle;
 
 /* summary of the run, complete when finished = 1 */
@@ -149,9 +153,58 @@ typedef struct sxe_result
     double      seconds;
 } sxe_result;
 
+/* an execution (2.1): every fill of an order, a liquidation or a partial liquidation */
+typedef struct sxe_fill
+{
+    int64_t     time;
+    int64_t     order_id;       /* id of the limit or stop order, 0 = market order or liquidation */
+    const char* side;           /* position: "long" or "short" */
+    const char* action;         /* "open" (open or increase), "reduce", "close", "liquidation", "partial_liquidation" */
+    const char* type;           /* "market", "limit", "stop" */
+    double      price;
+    double      qty;
+    double      fee;
+    double      pnl;            /* gross PnL realized (reduce, close, partial liquidation); liquidation: what is lost (<= 0) */
+    double      position_qty;   /* the position after the fill */
+    double      avg_price;      /* average price after the fill (close, liquidation: of the closed position) */
+    double      wallet;         /* balance after the fill */
+    double      funding;        /* close, liquidation: funding paid by the position (negative if received) */
+    const char* reason;         /* reduce, close, liquidation: "strategy", "limit", "stop", "liquidation" */
+} sxe_fill;
+
+/* the account at every closed candle (2.1) */
+typedef struct sxe_candle_state
+{
+    int64_t time;               /* open time of the closed candle */
+    double  open;
+    double  high;
+    double  low;
+    double  close;
+    double  equity;             /* after the strategy ran at the first price after the close */
+    double  wallet;
+    double  drawdown_pct;       /* from the highest equity so far, <= 0 */
+    double  long_qty;
+    double  long_avg;
+    double  short_qty;
+    double  short_avg;
+} sxe_candle_state;
+
+/* a candle given by the caller (2.1) */
+typedef struct sxe_candle
+{
+    int64_t time;               /* open time, seconds since 1970-01-01 UTC, increasing */
+    double  open;
+    double  high;
+    double  low;
+    double  close;
+    double  volume;
+} sxe_candle;
+
 typedef void (*sxe_log_fn)(void* user, sxe_log_level level, const char* message);
 typedef void (*sxe_progress_fn)(void* user, const sxe_progress* progress);
 typedef void (*sxe_cycle_fn)(void* user, const sxe_cycle* cycle);
+typedef void (*sxe_fill_fn)(void* user, const sxe_fill* fill);
+typedef void (*sxe_candle_fn)(void* user, const sxe_candle_state* candle);
 
 /* ---------- library ---------- */
 SXE_API int         sxe_api_version(void);   /* SXE_C_API_VERSION the library was built with */
@@ -177,6 +230,13 @@ SXE_API sxe_status sxe_engine_set_option(sxe_engine* engine, sxe_option option, 
 SXE_API sxe_status sxe_engine_on_log(sxe_engine* engine, sxe_log_fn fn, void* user);
 SXE_API sxe_status sxe_engine_on_progress(sxe_engine* engine, sxe_progress_fn fn, void* user);
 SXE_API sxe_status sxe_engine_on_cycle(sxe_engine* engine, sxe_cycle_fn fn, void* user);
+SXE_API sxe_status sxe_engine_on_fill(sxe_engine* engine, sxe_fill_fn fn, void* user);
+SXE_API sxe_status sxe_engine_on_candle(sxe_engine* engine, sxe_candle_fn fn, void* user);
+
+/* the candles to simulate, instead of [SIMULATION] data_file (which is then not needed, nor
+ * [PATH] data): copied, so the array can be freed after the call. interval_seconds = length of
+ * a candle; start_date and end_date do not apply (give only the period wanted). */
+SXE_API sxe_status sxe_engine_set_candles(sxe_engine* engine, const sxe_candle* candles, int64_t count, int64_t interval_seconds);
 
 /* ---------- run ---------- */
 /* checks the configuration, creates the output folders, loads strategy and data */

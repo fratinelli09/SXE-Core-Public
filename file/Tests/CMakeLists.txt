@@ -18,6 +18,14 @@ foreach(TEST_LIB TestStrategy OldApiStrategy)
     )
 endforeach()
 
+# the test strategy in C on the C contract (sxe_strategy.h): it links nothing of the engine
+add_library(TestStrategyC MODULE TestStrategy/TestStrategyC.c)
+target_include_directories(TestStrategyC PRIVATE ${CMAKE_SOURCE_DIR}/file/SDK)
+set_target_properties(TestStrategyC PROPERTIES
+    PREFIX "lib"
+    C_VISIBILITY_PRESET hidden
+)
+
 set(SXE_TEST_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "")
 set(SXE_TEST_SCRIPT   ${CMAKE_CURRENT_SOURCE_DIR}/SxeTest.cmake CACHE INTERNAL "")
 set(SXE_TEST_GOLDEN   ${CMAKE_CURRENT_SOURCE_DIR}/Golden)
@@ -31,13 +39,13 @@ set(SIMPLEDCA_CONFIG  ${CMAKE_SOURCE_DIR}/Target/Config/SimpleDca.ini)
 # sxe_test_config(<name> LIBRARY .. FOLDER .. STRATEGY_CONFIG .. [DIR ..] [RESUME 0|1]
 #                 [INTRABAR n] [MARGIN isolated|crossed] [END_DATE YYYY-MM-DD]
 #                 [SLIPPAGE x] [FUNDING_MULT x] [TIERS "limit:rate, ..."] [CAPITAL x] [LIQUIDATION 0|1]
-#                 [DATA_FILE file] [LIMIT_FILL through|touch])
+#                 [DATA_FILE file] [LIMIT_FILL through|touch] [POSITION_MODE one_way|hedge])
 # defaults = rules the references were created with: slippage 0.02%, funding x1,
 # maintenance margin 0.4% on the whole position, capital 5000
 # generates CMakeWork/file/Tests/<name>.ini; DIR = Log and Backup folder (default <name>)
 #----------------------------------------------------------
 function(sxe_test_config NAME)
-    cmake_parse_arguments(ARG "" "LIBRARY;FOLDER;STRATEGY_CONFIG;DIR;RESUME;INTRABAR;MARGIN;END_DATE;SLIPPAGE;FUNDING_MULT;TIERS;CAPITAL;LIQUIDATION;DATA_FILE;LIMIT_FILL" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "LIBRARY;FOLDER;STRATEGY_CONFIG;DIR;RESUME;INTRABAR;MARGIN;END_DATE;SLIPPAGE;FUNDING_MULT;TIERS;CAPITAL;LIQUIDATION;DATA_FILE;LIMIT_FILL;POSITION_MODE" "" ${ARGN})
     set(T_NAME            ${NAME})
     set(T_LIBRARY         ${ARG_LIBRARY})
     set(T_STRATEGY_FOLDER ${ARG_FOLDER})
@@ -54,7 +62,8 @@ function(sxe_test_config NAME)
     set(T_LIQUIDATION     1)
     set(T_DATA_FILE       BTCUSDT_1h_2023_2024.csv)
     set(T_LIMIT_FILL      through)
-    foreach(OPT SLIPPAGE FUNDING_MULT TIERS CAPITAL LIQUIDATION DATA_FILE LIMIT_FILL)
+    set(T_POSITION_MODE   one_way)
+    foreach(OPT SLIPPAGE FUNDING_MULT TIERS CAPITAL LIQUIDATION DATA_FILE LIMIT_FILL POSITION_MODE)
         if(DEFINED ARG_${OPT})
             set(T_${OPT} "${ARG_${OPT}}")
         endif()
@@ -74,14 +83,23 @@ function(sxe_test_config NAME)
     configure_file(${SXE_TEST_SOURCE_DIR}/EngineConfig.test.ini.in ${CMAKE_CURRENT_BINARY_DIR}/${NAME}.ini @ONLY)
 endfunction()
 
-# test strategy configurations: leverage, step at which to stop [, limit_dip: % below the entry of a
-# limit buy, with a limit close at +tp%; 0 = market orders only]
+# test strategy configurations: leverage, step at which to stop [, limit_dip: % against the entry
+# of a limit increase, with a limit close at +tp%; 0 = market orders only
+# [, side: long, short, both [, stop_loss: %, 0 = none]]]
 function(sxe_test_strategy_config NAME LEVERAGE STOP_AT_STEP)
     set(T_LEVERAGE     ${LEVERAGE})
     set(T_STOP_AT_STEP ${STOP_AT_STEP})
     set(T_LIMIT_DIP    0)
+    set(T_SIDE         long)
+    set(T_STOP_LOSS    0)
     if(ARGC GREATER 3)
         set(T_LIMIT_DIP ${ARGV3})
+    endif()
+    if(ARGC GREATER 4)
+        set(T_SIDE ${ARGV4})
+    endif()
+    if(ARGC GREATER 5)
+        set(T_STOP_LOSS ${ARGV5})
     endif()
     configure_file(TestStrategy/TestStrategy.ini.in ${CMAKE_CURRENT_BINARY_DIR}/${NAME}.ini @ONLY)
 endfunction()
@@ -92,6 +110,12 @@ sxe_test_strategy_config(TestStrategy_stop  3  123457)
 sxe_test_strategy_config(TestStrategy_limit       3 0      3)
 sxe_test_strategy_config(TestStrategy_limit_stop  3 123457 3)
 sxe_test_strategy_config(TestStrategy_limit_small 1 0      2)
+sxe_test_strategy_config(TestStrategy_short       10 0      0 short)
+sxe_test_strategy_config(TestStrategy_short_limit 3  0      3 short)
+sxe_test_strategy_config(TestStrategy_both        10 0      0 both)
+sxe_test_strategy_config(TestStrategy_both_stop   5  0      0 both 4)
+sxe_test_strategy_config(TestStrategy_both_limit  3  0      3 both 6)
+sxe_test_strategy_config(TestStrategy_both_limit_stop 3 123457 3 both 6)
 
 set(TEST_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
@@ -178,13 +202,62 @@ sxe_test_config(golden_limit LIBRARY TestStrategy FOLDER ${TEST_DIR}
 # SimpleDca, the DCA of the case study (docs/case_study.md): safety orders, take profit, leverage 3
 sxe_test_config(golden_simpledca LIBRARY SimpleDca FOLDER ${SIMPLEDCA_DIR} STRATEGY_CONFIG ${SIMPLEDCA_CONFIG})
 
+# short: the test strategy on the other side, leverage 10, isolated and crossed liquidations
+sxe_test_config(golden_short LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_short.ini)
+sxe_test_config(golden_short_crossed LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_short.ini MARGIN crossed)
+# short with limit orders: limit sell above the entry, limit close below
+sxe_test_config(golden_short_limit LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_short_limit.ini)
+# hedge: long and short together, isolated (each with its own liquidation) and crossed (Bitget
+# tiers, offset before the liquidation)
+sxe_test_config(golden_hedge LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both.ini POSITION_MODE hedge)
+sxe_test_config(golden_hedge_crossed LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both.ini POSITION_MODE hedge MARGIN crossed CAPITAL 100000
+                TIERS "200000:0.004, 1000000:0.005, 5000000:0.007, 15000000:0.01, 50000000:0.02")
+# hedge with a 4% stop loss: closes on a trigger
+sxe_test_config(golden_hedge_stop LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both_stop.ini POSITION_MODE hedge)
+# Template long and short (direction = both): at every cross the position goes to the other side, leverage 3
+file(READ ${TEMPLATE_CONFIG} TEMPLATE_TEXT)
+string(REPLACE "direction   = long" "direction   = both" TEMPLATE_TEXT "${TEMPLATE_TEXT}")
+string(REPLACE "leverage    = 1" "leverage    = 3" TEMPLATE_TEXT "${TEMPLATE_TEXT}")
+file(WRITE ${TEST_DIR}/Template_both.ini "${TEMPLATE_TEXT}")
+sxe_test_config(golden_template_both LIBRARY Template FOLDER ${TEMPLATE_DIR} STRATEGY_CONFIG ${TEST_DIR}/Template_both.ini)
+
 foreach(GOLDEN_TEST golden_template golden_isolated golden_crossed golden_low_first golden_high_first golden_bitget golden_limit
-                    golden_simpledca)
+                    golden_simpledca golden_short golden_short_crossed golden_short_limit golden_hedge golden_hedge_crossed
+                    golden_hedge_stop golden_template_both)
     add_test(NAME ${GOLDEN_TEST}
              COMMAND ${CMAKE_COMMAND} -DMODE=GOLDEN -DSXE=$<TARGET_FILE:SXE>
                      -DCONFIG=${TEST_DIR}/${GOLDEN_TEST}.ini -DDIR=${TEST_DIR}/${GOLDEN_TEST}
                      -DGOLDEN=${SXE_TEST_GOLDEN}/${GOLDEN_TEST}.txt -P ${SXE_TEST_SCRIPT})
 endforeach()
+
+# C contract: the test strategy written in C (TestStrategyC) must give the same cycles as the
+# C++ version in every golden test: market, limit and stop orders, reductions, moves,
+# cancellations, long, short and hedge. Same configurations, only the library changes.
+foreach(GOLDEN_TEST golden_isolated golden_crossed golden_low_first golden_high_first golden_bitget golden_limit
+                    golden_short golden_short_crossed golden_short_limit golden_hedge golden_hedge_crossed golden_hedge_stop)
+    file(READ ${TEST_DIR}/${GOLDEN_TEST}.ini C_CONFIG_TEXT)
+    string(REPLACE "library = TestStrategy" "library = TestStrategyC" C_CONFIG_TEXT "${C_CONFIG_TEXT}")
+    string(REPLACE "${TEST_DIR}/${GOLDEN_TEST}/" "${TEST_DIR}/${GOLDEN_TEST}_c/" C_CONFIG_TEXT "${C_CONFIG_TEXT}")
+    file(WRITE ${TEST_DIR}/${GOLDEN_TEST}_c.ini "${C_CONFIG_TEXT}")
+    add_test(NAME ${GOLDEN_TEST}_c
+             COMMAND ${CMAKE_COMMAND} -DMODE=GOLDEN -DSXE=$<TARGET_FILE:SXE>
+                     -DCONFIG=${TEST_DIR}/${GOLDEN_TEST}_c.ini -DDIR=${TEST_DIR}/${GOLDEN_TEST}_c
+                     -DGOLDEN=${SXE_TEST_GOLDEN}/${GOLDEN_TEST}.txt -P ${SXE_TEST_SCRIPT})
+endforeach()
+
+# C contract: library with sxe_strategy_api_version but without the other functions
+add_library(IncompleteC MODULE TestStrategy/IncompleteC.c)
+target_include_directories(IncompleteC PRIVATE ${CMAKE_SOURCE_DIR}/file/SDK)
+set_target_properties(IncompleteC PROPERTIES PREFIX "lib")
+sxe_test_config(loader_c_incomplete LIBRARY IncompleteC FOLDER ${TEST_DIR} STRATEGY_CONFIG ${TEMPLATE_CONFIG})
+add_test(NAME loader_c_incomplete COMMAND SXE ${TEST_DIR}/loader_c_incomplete.ini)
+set_tests_properties(loader_c_incomplete PROPERTIES PASS_REGULAR_EXPRESSION "Incomplete strategy with the C contract.*sxe_strategy_step")
 
 #--- 3. resume: stop mid-candle + resume = uninterrupted run -----------------
 sxe_test_config(resume_full LIBRARY TestStrategy FOLDER ${TEST_DIR}
@@ -212,6 +285,19 @@ add_test(NAME resume_limit
                  -DCONFIG_STOP=${TEST_DIR}/resume_limit_stop.ini -DCONFIG_RESUME=${TEST_DIR}/resume_limit_continue.ini
                  -DDIR_RESUME=${TEST_DIR}/resume_limit_split -P ${SXE_TEST_SCRIPT})
 
+# hedge with limit and stop orders open on both sides: the state keeps them
+sxe_test_config(resume_hedge_full LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both_limit.ini POSITION_MODE hedge RESUME 1)
+sxe_test_config(resume_hedge_stop LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both_limit_stop.ini POSITION_MODE hedge DIR resume_hedge_split RESUME 1)
+sxe_test_config(resume_hedge_continue LIBRARY TestStrategy FOLDER ${TEST_DIR}
+                STRATEGY_CONFIG ${TEST_DIR}/TestStrategy_both_limit.ini POSITION_MODE hedge DIR resume_hedge_split RESUME 1)
+add_test(NAME resume_hedge
+         COMMAND ${CMAKE_COMMAND} -DMODE=RESUME -DSXE=$<TARGET_FILE:SXE>
+                 -DCONFIG_FULL=${TEST_DIR}/resume_hedge_full.ini -DDIR_FULL=${TEST_DIR}/resume_hedge_full
+                 -DCONFIG_STOP=${TEST_DIR}/resume_hedge_stop.ini -DCONFIG_RESUME=${TEST_DIR}/resume_hedge_continue.ini
+                 -DDIR_RESUME=${TEST_DIR}/resume_hedge_split -P ${SXE_TEST_SCRIPT})
+
 #--- 3b. limit orders on hand-made candles ------------------------------------
 # entry at 100 at the first step (no slippage), limit buy at 98, limit close at +2% of the average price.
 # 01:00 the low touches 98: filled only with limit_fill = touch; 02:00 the low goes 0.3% below:
@@ -231,11 +317,11 @@ foreach(LIMIT_FILL through touch)
     add_test(NAME limit_${LIMIT_FILL}
              COMMAND ${CMAKE_COMMAND} -DMODE=ORDERS -DSXE=$<TARGET_FILE:SXE>
                      -DCONFIG=${TEST_DIR}/limit_${LIMIT_FILL}.ini -DDIR=${TEST_DIR}/limit_${LIMIT_FILL}
-                     "-DMATCH1=^2024-01-01 01:00[^|]*\\|BUY\\|100.00\\|100.00\\|25.000000\\|1.5000\\|.*\\|market\\|\\|\\|0.000600$"
-                     "-DMATCH2=^2024-01-01 ${LIMIT_HOUR}:[^|]*\\|FILL_BUY\\|[^|]*\\|98.00\\|12.747400\\|0.2498\\|.*\\|limit\\|1\\|98.00\\|0.000200$"
-                     "-DMATCH3=\\|FILL_CLOSE\\|[^|]*\\|101.31\\|37.747400\\|0.7648\\|.*\\|limit\\|2\\|101.31\\|0.000200$"
+                     "-DMATCH1=^2024-01-01 01:00[^|]*\\|BUY\\|100.00\\|100.00\\|25.000000\\|1.5000\\|.*\\|market\\|\\|\\|0.000600\\|long$"
+                     "-DMATCH2=^2024-01-01 ${LIMIT_HOUR}:[^|]*\\|FILL_BUY\\|[^|]*\\|98.00\\|12.747400\\|0.2498\\|.*\\|limit\\|1\\|98.00\\|0.000200\\|long$"
+                     "-DMATCH3=\\|FILL_CLOSE\\|[^|]*\\|101.31\\|37.747400\\|0.7648\\|.*\\|limit\\|2\\|101.31\\|0.000200\\|long$"
                      "-DMATCH4=\\|MOVE\\|"
-                     "-DABSENT=${LIMIT_ABSENT}" "-DRESULT_MATCH=^1\\|.*\\|limit$"
+                     "-DABSENT=${LIMIT_ABSENT}" "-DRESULT_MATCH=^1\\|.*\\|limit\\|long$"
                      -P ${SXE_TEST_SCRIPT})
 endforeach()
 
@@ -249,7 +335,12 @@ foreach(MULTI_TEST golden_template golden_isolated)
              COMMAND SxeMultiRunTest ${TEST_DIR}/${MULTI_TEST}.ini ${TEST_DIR}/multirun_${MULTI_TEST} 4)
 endforeach()
 
-#--- 5. C interface (libSXE.so, sxe.h), from programs written in C ----------
+#--- 5a. simulated exchange: short, one-way and hedge, cross and isolated, stop, tiers -----
+add_executable(SxeExchangeTest Exchange/SxeExchangeTest.cpp)
+target_link_libraries(SxeExchangeTest PRIVATE Engine)
+add_test(NAME exchange_positions COMMAND SxeExchangeTest)
+
+#--- 5b. C interface (libSXE.so / SXE.dll, sxe.h), from programs written in C --------
 enable_language(C)
 foreach(API_PROGRAM SxeApiRun SxeApiTest)
     add_executable(${API_PROGRAM} Api/${API_PROGRAM}.c)

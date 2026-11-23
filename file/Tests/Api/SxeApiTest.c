@@ -50,6 +50,86 @@ static void OnCycle(void* user, const sxe_cycle* cycle)
 		c->nCycles++;
 }
 
+/* fills and candles (2.1) */
+typedef struct Fills
+{
+	int     nOpen, nReduce, nClose, nLiquidation, nPartial;
+	int     nCandles;
+	int     bOk;
+	double  dLastWallet;
+	double  dLastEquity;
+	int64_t nLastCandle;
+} Fills;
+
+static void OnFill(void* user, const sxe_fill* f)
+{
+	Fills* p = (Fills*)user;
+	if(strcmp(f->action, "open") == 0)
+		p->nOpen++;
+	else if(strcmp(f->action, "reduce") == 0)
+		p->nReduce++;
+	else if(strcmp(f->action, "close") == 0)
+		p->nClose++;
+	else if(strcmp(f->action, "liquidation") == 0)
+		p->nLiquidation++;
+	else
+		p->nPartial++;
+	if(!(f->price > 0) || !(f->qty > 0) || (strcmp(f->side, "long") != 0 && strcmp(f->side, "short") != 0))
+		p->bOk = 0;
+	p->dLastWallet = f->wallet;
+}
+
+static void OnCandle(void* user, const sxe_candle_state* c)
+{
+	Fills* p = (Fills*)user;
+	if(c->time <= p->nLastCandle || !(c->high >= c->low) || c->drawdown_pct > 0)
+		p->bOk = 0;
+	p->nLastCandle = c->time;
+	p->dLastEquity = c->equity;
+	p->nCandles++;
+}
+
+/* days since 1970-01-01 (H. Hinnant) */
+static int64_t DaysFromCivil(int y, int m, int d)
+{
+	int64_t era;
+	unsigned yoe, doy, doe;
+	y -= m <= 2;
+	era = (y >= 0 ? y : y - 399) / 400;
+	yoe = (unsigned)(y - era * 400);
+	doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);
+	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + (int64_t)doe - 719468;
+}
+
+/* candles of the test CSV (date;time;open;high;low;close;volume) */
+static sxe_candle* ReadCandles(const char* pszFile, int64_t* pCount)
+{
+	FILE* f = fopen(pszFile, "r");
+	sxe_candle* v = NULL;
+	int64_t n = 0, cap = 0;
+	char line[256];
+	if(f == NULL)
+		return NULL;
+	while(fgets(line, sizeof(line), f))
+	{
+		int y, mo, d, h, mi;
+		sxe_candle c;
+		if(sscanf(line, "%d-%d-%d;%d:%d;%lf;%lf;%lf;%lf;%lf", &y, &mo, &d, &h, &mi, &c.open, &c.high, &c.low, &c.close, &c.volume) != 10)
+			continue;
+		c.time = DaysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60;
+		if(n == cap)
+		{
+			cap = cap ? cap * 2 : 1024;
+			v = (sxe_candle*)realloc(v, (size_t)cap * sizeof(sxe_candle));
+		}
+		v[n++] = c;
+	}
+	fclose(f);
+	*pCount = n;
+	return v;
+}
+
 static int FileExists(const char* pszPath)
 {
 	struct stat st;
@@ -233,6 +313,38 @@ int main(int argc, char* argv[])
 	CHECK(sxe_engine_setup(e) == SXE_ERR_SETUP && strstr(sxe_engine_error(e), "interface version") != NULL,
 	      "strategy built for another interface version: setup error with the reason");
 	sxe_engine_destroy(e);
+
+	/* 2.1: candles from memory, fills and closed candles */
+	{
+		Fills fills;
+		int64_t nCandles = 0;
+		sxe_candle* pCandles;
+		snprintf(buf, sizeof(buf), "%s/BTCUSDT_1h_2023_2024.csv", argv[6]);
+		pCandles = ReadCandles(buf, &nCandles);
+		CHECK(pCandles != NULL && nCandles > 17000, "candles of the CSV read by the test");
+
+		memset(&fills, 0, sizeof(fills));
+		fills.bOk = 1;
+		e = NewEngine("memory");
+		sxe_engine_set(e, "SIMULATION", "data_file", "file_that_does_not_exist.csv");
+		CHECK(sxe_engine_set_candles(e, pCandles, 1, 3600) == SXE_ERR_ARGUMENT, "a single candle rejected");
+		CHECK(sxe_engine_set_candles(e, pCandles, nCandles, 3600) == SXE_OK, "candles given from memory");
+		sxe_engine_on_fill(e, OnFill, &fills);
+		sxe_engine_on_candle(e, OnCandle, &fills);
+		status = sxe_engine_run(e);
+		if(status != SXE_OK)
+			printf("%s\n", sxe_engine_error(e));
+		CHECK(status == SXE_OK && SameResult(&fullResult, sxe_engine_result(e)),
+		      "candles from memory (data_file not needed): the same numbers as the run from the CSV");
+		CHECK(fills.bOk, "fills and candles with consistent values");
+		CHECK(fills.nClose == fullResult.cycles && fills.nLiquidation == fullResult.liquidations,
+		      "one close per closed position, one liquidation per liquidation");
+		CHECK(fills.nOpen + fills.nClose + fills.nReduce == fullResult.orders, "one fill per executed order");
+		CHECK(fills.nCandles >= nCandles - 2 && fills.nCandles <= nCandles, "one call per closed candle");
+		CHECK(fills.dLastEquity > 0 || fullResult.final_equity <= 0, "equity of the last candle");
+		sxe_engine_destroy(e);
+		free(pCandles);
+	}
 
 	sxe_engine_destroy(full);
 

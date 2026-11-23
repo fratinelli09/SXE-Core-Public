@@ -19,12 +19,16 @@ public:
 private:
 	void _AddClose(double dClose);
 	void _WriteCycleFile(const std::string& strLine);
+	void _Open(StepContext& ctx, PositionSide eSide, double dFast, double dSlow);
+	void _Close(StepContext& ctx, double dFast, double dSlow);
 
 private:
 	int    nFastPeriod;
 	int    nSlowPeriod;
 	double dOrderPerc;
 	double dLeverage;
+	bool   bLong;					//direction = long or both: long on upward crosses
+	bool   bShort;					//direction = short or both: short on downward crosses
 
 	std::vector<double> vCloses;
 	long long nCount;

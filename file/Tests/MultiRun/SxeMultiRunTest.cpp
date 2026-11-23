@@ -118,10 +118,20 @@ int main(int argc, char* argv[])
 	}
 	std::cout << "full:      " << Describe(full.result) << " [" << dFullSec << " s]" << std::endl;
 
+	// candles read once and shared by the light runs
+	std::string strError;
+	tStart = std::chrono::steady_clock::now();
 	EngineOptions light;
 	light.bArchive   = false;
 	light.bStateFile = false;
 	light.bOrderLog  = false;
+	light.pCandles   = CCsvFeed::Read(base.sim.strDataFile, base.sim.strStartDate, base.sim.strEndDate, strError);
+	if(!light.pCandles)
+	{
+		std::cerr << strError << std::endl;
+		return 1;
+	}
+	std::cout << "candles:   " << light.pCandles->vCandles.size() << " read in " << Seconds(tStart) << " s" << std::endl;
 
 	tStart = std::chrono::steady_clock::now();
 	const Run single = Simulate(base, pWork / "single", light, false);

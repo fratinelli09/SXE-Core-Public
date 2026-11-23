@@ -29,6 +29,7 @@
 
 #define CFG_EXCHANGE_SECTION                "EXCHANGE"
 #define CFG_EXCHANGE_MARGIN_MODE            "margin_mode"
+#define CFG_EXCHANGE_POSITION_MODE          "position_mode"
 #define CFG_EXCHANGE_FEE_TAKER              "fee_taker"
 #define CFG_EXCHANGE_FEE_MAKER              "fee_maker"
 #define CFG_EXCHANGE_SLIPPAGE               "slippage"
@@ -39,6 +40,8 @@
 #define CFG_EXCHANGE_MIN_NOTIONAL           "min_notional"
 #define CFG_MARGIN_CROSSED                  "crossed"
 #define CFG_MARGIN_ISOLATED                 "isolated"
+#define CFG_POSITION_ONE_WAY                "one_way"
+#define CFG_POSITION_HEDGE                  "hedge"
 
 #define CFG_SIM_SECTION                     "SIMULATION"
 #define CFG_SIM_DATA_FILE                   "data_file"
@@ -133,6 +136,7 @@ public:
     struct ExchangeSettings
     {
         std::string strMarginMode      = CFG_MARGIN_ISOLATED;
+        std::string strPositionMode    = CFG_POSITION_ONE_WAY;
         double      dFeeTaker          = 0.0006;
         double      dFeeMaker          = 0.0002;
         double      dSlippage          = 0.0002;
@@ -184,6 +188,10 @@ public:
     bool Load(const std::string& strConfigFile, const std::string& strBaseDir);
 
     bool LoadText(const std::string& strText, const std::string& strName, const std::string& strBaseDir);
+
+    // the candles come ready (C interface, sxe_engine_set_candles): [SIMULATION] data_file and
+    // [PATH] data are not needed. To be set before Load()/LoadText()
+    bool bDataInMemory = false;
 
     bool CreateOutputFolders();
 

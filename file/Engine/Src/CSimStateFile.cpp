@@ -13,6 +13,7 @@
 #define STATE_RUN			"RUN"
 #define STATE_ACCOUNT		"ACCOUNT"
 #define STATE_POSITION		"POSITION"
+#define STATE_SHORT			"POSITION_SHORT"
 #define STATE_STATS			"STATS"
 #define STATE_CYCLE			"CYCLE"
 #define STATE_ORDERS		"ORDERS"
@@ -83,6 +84,7 @@ bool CSimStateFile::Save(const std::string& strFile, const SimState& s, std::str
 	out << std::setprecision(17);
 
 	const Position& p = s.exchange.position;
+	const Position& q = s.exchange.shortPosition;
 	const CSimExchange::Stats& st = s.exchange.stats;
 	const CCycleArchive::Snapshot& c = s.cycle;
 
@@ -102,12 +104,23 @@ bool CSimStateFile::Save(const std::string& strFile, const SimState& s, std::str
 	    << "funding_slot = "  << s.exchange.nFundingSlot << "\n"
 	    << "\n[" STATE_POSITION "]\n"
 	    << "open = "          << (p.bOpen ? 1 : 0)  << "\n"
+	    << "side = "          << (p.eSide == PositionSide::Short ? "short" : "long") << "\n"
 	    << "qty = "           << p.dQty             << "\n"
 	    << "avg_price = "     << p.dAvgPrice        << "\n"
 	    << "margin = "        << p.dMargin          << "\n"
 	    << "leverage = "      << p.dLeverage        << "\n"
 	    << "fees_paid = "     << p.dFeesPaid        << "\n"
 	    << "funding_paid = "  << p.dFundingPaid     << "\n"
+	    << "realized_pnl = "  << p.dRealizedPnL     << "\n"
+	    << "\n[" STATE_SHORT "]\n"
+	    << "open = "          << (q.bOpen ? 1 : 0)  << "\n"
+	    << "qty = "           << q.dQty             << "\n"
+	    << "avg_price = "     << q.dAvgPrice        << "\n"
+	    << "margin = "        << q.dMargin          << "\n"
+	    << "leverage = "      << q.dLeverage        << "\n"
+	    << "fees_paid = "     << q.dFeesPaid        << "\n"
+	    << "funding_paid = "  << q.dFundingPaid     << "\n"
+	    << "realized_pnl = "  << q.dRealizedPnL     << "\n"
 	    << "\n[" STATE_STATS "]\n"
 	    << "orders = "        << st.nOrders         << "\n"
 	    << "rejected = "      << st.nRejected       << "\n"
@@ -121,6 +134,11 @@ bool CSimStateFile::Save(const std::string& strFile, const SimState& s, std::str
 	    << "limit_fills = "   << st.nLimitFills     << "\n"
 	    << "cancelled = "     << st.nCancelled      << "\n"
 	    << "maker_fees = "    << st.dMakerFees      << "\n"
+	    << "partial_liquidations = " << st.nPartialLiquidations << "\n"
+	    << "stop_orders = "   << st.nStopOrders     << "\n"
+	    << "stop_fills = "    << st.nStopFills      << "\n"
+	    << "cycle_fees = "    << s.exchange.dCycleFees    << "\n"
+	    << "cycle_funding = " << s.exchange.dCycleFunding << "\n"
 	    << "\n[" STATE_CYCLE "]\n"
 	    << "open = "          << (c.bOpen ? 1 : 0)  << "\n"
 	    << "open_time = "     << c.nOpenTime        << "\n"
@@ -129,14 +147,19 @@ bool CSimStateFile::Save(const std::string& strFile, const SimState& s, std::str
 	    << "buys = "          << c.nBuys            << "\n"
 	    << "min_equity = "    << c.dMinEquityPerc   << "\n"
 	    << "max_leverage = "  << c.dMaxLeverage     << "\n"
+	    << "long = "          << (c.bLong ? 1 : 0)  << "\n"
+	    << "short = "         << (c.bShort ? 1 : 0) << "\n"
 	    << "\n[" STATE_ORDERS "]\n"
 	    << "next_id = "       << s.exchange.nNextOrderId    << "\n"
 	    << "count = "         << s.exchange.vOrders.size()  << "\n";
 	for(size_t i = 0; i < s.exchange.vOrders.size(); i++)
 	{
 		const LimitOrder& o = s.exchange.vOrders[i];
-		out << "order." << (i + 1) << " = " << o.nId << ";" << (o.eSide == OrderSide::Buy ? "buy" : "close") << ";"
-		    << o.dPrice << ";" << o.dUsdt << ";" << o.dLeverage << ";" << o.dQty << ";" << o.dReserved << ";" << o.nTime << "\n";
+		out << "order." << (i + 1) << " = " << o.nId << ";"
+		    << (o.eSide == OrderSide::Buy ? "buy" : o.eSide == OrderSide::Sell ? "sell" : "close") << ";"
+		    << o.dPrice << ";" << o.dUsdt << ";" << o.dLeverage << ";" << o.dQty << ";" << o.dReserved << ";" << o.nTime << ";"
+		    << (o.ePositionSide == PositionSide::Long ? "long" : "short") << ";"
+		    << (o.eType == OrderType::Stop ? "stop" : "limit") << ";" << (o.bAll ? 1 : 0) << ";" << (o.bAbove ? 1 : 0) << "\n";
 	}
 
 	const std::string strTmp = strFile + ".tmp";
@@ -172,6 +195,7 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 	}
 
 	Position& p = s.exchange.position;
+	Position& q = s.exchange.shortPosition;
 	CSimExchange::Stats& st = s.exchange.stats;
 	CCycleArchive::Snapshot& c = s.cycle;
 
@@ -195,6 +219,27 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 	in.Get(STATE_POSITION, "leverage", p.dLeverage);
 	in.Get(STATE_POSITION, "fees_paid", p.dFeesPaid);
 	in.Get(STATE_POSITION, "funding_paid", p.dFundingPaid);
+	if(in.Has(STATE_POSITION, "realized_pnl"))
+		in.Get(STATE_POSITION, "realized_pnl", p.dRealizedPnL);
+	//one-way: the position can be short (states saved before shorts existed: always long)
+	if(in.Has(STATE_POSITION, "side"))
+	{
+		std::string strSide;
+		in.Get(STATE_POSITION, "side", strSide);
+		p.eSide = strSide == "short" ? PositionSide::Short : PositionSide::Long;
+	}
+	q.eSide = PositionSide::Short;
+	if(in.Has(STATE_SHORT, "open"))
+	{
+		in.Get(STATE_SHORT, "open", q.bOpen);
+		in.Get(STATE_SHORT, "qty", q.dQty);
+		in.Get(STATE_SHORT, "avg_price", q.dAvgPrice);
+		in.Get(STATE_SHORT, "margin", q.dMargin);
+		in.Get(STATE_SHORT, "leverage", q.dLeverage);
+		in.Get(STATE_SHORT, "fees_paid", q.dFeesPaid);
+		in.Get(STATE_SHORT, "funding_paid", q.dFundingPaid);
+		in.Get(STATE_SHORT, "realized_pnl", q.dRealizedPnL);
+	}
 
 	in.Get(STATE_STATS, "orders", st.nOrders);
 	in.Get(STATE_STATS, "rejected", st.nRejected);
@@ -211,6 +256,20 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 		in.Get(STATE_STATS, "cancelled", st.nCancelled);
 		in.Get(STATE_STATS, "maker_fees", st.dMakerFees);
 	}
+	if(in.Has(STATE_STATS, "cycle_fees"))
+	{
+		in.Get(STATE_STATS, "partial_liquidations", st.nPartialLiquidations);
+		in.Get(STATE_STATS, "stop_orders", st.nStopOrders);
+		in.Get(STATE_STATS, "stop_fills", st.nStopFills);
+		in.Get(STATE_STATS, "cycle_fees", s.exchange.dCycleFees);
+		in.Get(STATE_STATS, "cycle_funding", s.exchange.dCycleFunding);
+	}
+	else
+	{
+		//states saved before shorts existed: the cycle is the position
+		s.exchange.dCycleFees    = p.dFeesPaid;
+		s.exchange.dCycleFunding = p.dFundingPaid;
+	}
 
 	in.Get(STATE_CYCLE, "open", c.bOpen);
 	in.Get(STATE_CYCLE, "open_time", c.nOpenTime);
@@ -219,6 +278,13 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 	in.Get(STATE_CYCLE, "buys", c.nBuys);
 	in.Get(STATE_CYCLE, "min_equity", c.dMinEquityPerc);
 	in.Get(STATE_CYCLE, "max_leverage", c.dMaxLeverage);
+	if(in.Has(STATE_CYCLE, "long"))
+	{
+		in.Get(STATE_CYCLE, "long", c.bLong);
+		in.Get(STATE_CYCLE, "short", c.bShort);
+	}
+	else
+		c.bLong = c.bOpen;
 
 	s.exchange.vOrders.clear();
 	if(in.Has(STATE_ORDERS, "count"))
@@ -236,7 +302,8 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 			for(std::string strField; std::getline(fields, strField, ';'); )
 				vFields.push_back(strField);
 			LimitOrder o;
-			bool bValid = vFields.size() == 8 && (vFields[1] == "buy" || vFields[1] == "close");
+			bool bValid = (vFields.size() == 8 || vFields.size() == 12) &&
+			              (vFields[1] == "buy" || vFields[1] == "close" || vFields[1] == "sell");
 			try
 			{
 				if(bValid)
@@ -256,7 +323,15 @@ bool CSimStateFile::Load(const std::string& strFile, SimState& s, std::string& s
 				strError = "Invalid open order in " + strFile + ": [" STATE_ORDERS "] " + strKey + " = " + strOrder;
 				return false;
 			}
-			o.eSide = vFields[1] == "buy" ? OrderSide::Buy : OrderSide::Close;
+			o.eSide = vFields[1] == "buy" ? OrderSide::Buy : vFields[1] == "sell" ? OrderSide::Sell : OrderSide::Close;
+			o.ePositionSide = o.eSide == OrderSide::Sell ? PositionSide::Short : PositionSide::Long;
+			if(vFields.size() == 12)
+			{
+				o.ePositionSide = vFields[8] == "short" ? PositionSide::Short : PositionSide::Long;
+				o.eType         = vFields[9] == "stop" ? OrderType::Stop : OrderType::Limit;
+				o.bAll          = vFields[10] == "1";
+				o.bAbove        = vFields[11] == "1";
+			}
 			s.exchange.vOrders.push_back(o);
 		}
 	}
