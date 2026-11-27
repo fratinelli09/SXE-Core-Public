@@ -19,7 +19,7 @@ print(f"return {r.return_pct:+.2f}%, max drawdown {r.max_drawdown_pct:.2f}%")
 ```
 
 Windows package ready to run in every [release](https://github.com/fratinelli09/SXE-Core-Public/releases/latest).
-53 tests in CI on Linux arm64 and Windows x64. Version 2.2.0 ([CHANGELOG](CHANGELOG.md)) -
+53 tests in CI on Linux arm64 and Windows x64. Version 2.2.1 ([CHANGELOG](CHANGELOG.md)) -
 [Italian version](README_IT.md)
 
 The strategy is compiled as a separate shared library (`.so` on Linux, `.dll` on Windows)
@@ -575,8 +575,9 @@ SXE_UPDATE_GOLDEN=1 ctest --test-dir CMakeWork -R golden
 
 This repository is the public edition of SXE Core. Since 2.2.0 it has the same engine as the
 author's private edition: the same simulator, the same strategy interfaces (C++ and C), the same
-C and Python interfaces and the same results. The private edition adds the parameter tuning
-and the author's own strategies. For information about the private edition see [Contact](#contact).
+C and Python interfaces and the same results. Fixes to the simulator land in both editions.
+The private edition adds the parameter tuning, the periodic deposit (a fixed amount added to the
+balance every day, week or month) and the author's own strategies. For information about the private edition see [Contact](#contact).
 
 ### Parameter tuning - private edition
 SXE_Tune, a separate program: it runs many simulations of the same strategy in parallel

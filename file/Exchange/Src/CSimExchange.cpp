@@ -1339,18 +1339,10 @@ void CSimExchange::_CheckOrders()
 		{
 			_Update();
 			const bool bFlip = !_Hedge() && _Pos(_Other(order.ePositionSide)).bOpen;
-			const double dNeeded = order.dQty * order.dPrice / order.dLeverage + order.dQty * order.dPrice * rules.dFeeMaker;
-			if(!bFlip && dNeeded > account.dAvailable + 1e-9)
-			{
-				stats.nCancelled++;
-				OrderResult rejected;
-				rejected.eType    = OrderType::Limit;
-				rejected.nOrderId = order.nId;
-				rejected.strError = "insufficient margin at fill: order cancelled";
-				_LogOrder("CANCEL", rejected, order.dPrice, order.ePositionSide);
-				nFillOrderId = 0;
-				continue;
-			}
+			//open or increase: margin and fee were already locked when the order was placed
+			//(dReserved) and become position margin with no new check of the available balance,
+			//as on Bitget. In crossed mode the unrealised loss lowers the available balance but
+			//does not cancel an order that is already covered: it counts for liquidation
 			if(bFlip)
 			{
 				const long long nRejected = stats.nRejected;

@@ -358,6 +358,31 @@ namespace
 		                                + (105 - 95) * 7.523 - 7.523 * 95 * 0.0002);
 	}
 
+	//crossed with all the capital committed (position + limit buy): when the price reaches the
+	//limit the unrealised loss has pushed the available balance below the order's margin, but
+	//that margin was already locked and the order fills (as on Bitget)
+	void LimitFillCrossedFullyCommitted()
+	{
+		CSimExchange ex(Rules(MarginMode::Crossed, PositionMode::OneWay), 10000);
+		ex.SetLimitRules(false, 0);
+		ex.Refresh(1000, 100);
+		CHECK(ex.MarketBuy(4500, 3).bOk);							//qty = 4500*3/100 = 135
+		const double dWallet = 10000 - 135 * 100 * 0.0006;			//9991.9
+		//available = 9991.9 - 135*100/3 = 5491.9; reserved 170.526*95/3 + 170.526*95*0.0002 = 5403.2
+		const OrderResult r = ex.LimitBuy(95, 5400, 3);				//qty = 5400*3/95 = 170.5263 to the step
+		CHECK(r.bOk);
+		NEAR(r.dQty, 170.526);
+
+		//at 95: loss 135*5 = 675, available without the order 9991.9 - 675 - 135*95/3 = 5041.9 < 5403.2
+		ex.Refresh(2000, 95);
+		CHECK(ex.GetOpenOrders().empty());
+		const Position& p = ex.GetPosition(PositionSide::Long);
+		NEAR(p.dQty, 135 + 170.526);
+		NEAR(p.dAvgPrice, (135 * 100 + 170.526 * 95) / (135 + 170.526));
+		NEAR(p.dMargin, 4500 + 170.526 * 95 / 3);
+		NEAR(ex.GetAccount().dWallet, dWallet - 170.526 * 95 * 0.0002);
+	}
+
 	//hedge: a sell with the long open opens the short, it does not reduce the long
 	void HedgeKeepsBoth()
 	{
@@ -434,6 +459,7 @@ int main()
 	PartialReduce();
 	StopLoss();
 	LimitShort();
+	LimitFillCrossedFullyCommitted();
 	HedgeKeepsBoth();
 	StateRoundTrip();
 

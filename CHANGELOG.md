@@ -6,6 +6,17 @@ The strategy interface has its own number (`SXE_API_VERSION` in `file/SDK/Strate
 the engine refuses strategies built for a different one.
 
 
+## 2.2.1 - 2026-11-27
+
+- Limit orders that open or increase a position are no longer cancelled at the fill for lack
+  of available balance. Their margin and fee are locked when the order is placed and become
+  position margin at the fill, as on Bitget. Before, in crossed mode the unrealised loss of the
+  open position could push the available balance below the order's margin and the engine
+  cancelled an order the exchange would have filled (a DCA buy with all the capital committed).
+  The loss still counts for the liquidation. The golden references are unchanged; new exchange
+  test `LimitFillCrossedFullyCommitted`.
+
+
 ## 2.2.0 - 2026-11-23
 
 The engine of the private edition 2.2, without the parameter tuning: short positions, the C
